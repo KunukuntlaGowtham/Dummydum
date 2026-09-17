@@ -162,6 +162,29 @@ reading happens on the phone; nothing is uploaded.
 The strip searched is the width of about six boxes and four boxes deep, centred under the
 box. A label sitting to the side rather than underneath is not picked up.
 
+## Boxes that will not tick
+
+Every box gets **one** go. What happened is checked straight afterwards — the node's own
+state when the app publishes one, otherwise whether an empty box is still sitting where the
+tap landed. A box that did not take is written down with its label and the run moves on;
+nothing is ever tried a second time, and a box already tried is not picked again until the
+page scrolls.
+
+The misses build up in a see-through panel at the bottom of the screen while the run goes
+on ("Missed 3" and the last few labels). **Show missed boxes** in the app lists them all,
+shares them, or clears them. Turn the panel off with *Show the missed list on screen*; turn
+the whole check off with *Try each box once, then note the ones that failed*.
+
+## Aiming
+
+If taps land beside the checkbox rather than on it, turn on **Practice run**. START then
+rings everything it takes for an empty box and taps nothing, with a red cross at the exact
+point a tap would land:
+
+* cross on the checkbox, ring around it → the aim is right, the problem is elsewhere;
+* ring around the wrong thing → the shape test is matching something else;
+* ring in the right place but cross beside it → use the two **Nudge every tap** offsets.
+
 ## Building locally
 
 ```

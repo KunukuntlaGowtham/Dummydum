@@ -180,7 +180,7 @@ class ScreenService : Service() {
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
                     BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
-                        ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
+                        ?.let { toScreen(it, frame) }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "colour scan failed", t)
@@ -254,11 +254,27 @@ class ScreenService : Service() {
         }
     }
 
+    /**
+     * The picture is a scaled copy of the screen, and the two do not divide evenly on every
+     * phone, so places are converted by the real ratio between them rather than by [SCALE].
+     * Getting this wrong puts every tap slightly off the thing it was aiming at.
+     */
+    private fun toScreen(r: Rect, frame: Frame): Rect {
+        val sx = if (frame.w > 0) screenW.toFloat() / frame.w else SCALE.toFloat()
+        val sy = if (frame.h > 0) screenH.toFloat() / frame.h else SCALE.toFloat()
+        return Rect(
+            (r.left * sx).toInt(), (r.top * sy).toInt(),
+            (r.right * sx).toInt(), (r.bottom * sy).toInt()
+        )
+    }
+
     private fun crop(frame: Frame, region: Rect): Bitmap? {
-        val left = (region.left / SCALE).coerceIn(0, frame.w - 1)
-        val top = (region.top / SCALE).coerceIn(0, frame.h - 1)
-        val right = (region.right / SCALE).coerceIn(left + 1, frame.w)
-        val bottom = (region.bottom / SCALE).coerceIn(top + 1, frame.h)
+        val sx = if (screenW > 0) frame.w.toFloat() / screenW else 1f / SCALE
+        val sy = if (screenH > 0) frame.h.toFloat() / screenH else 1f / SCALE
+        val left = (region.left * sx).toInt().coerceIn(0, frame.w - 1)
+        val top = (region.top * sy).toInt().coerceIn(0, frame.h - 1)
+        val right = (region.right * sx).toInt().coerceIn(left + 1, frame.w)
+        val bottom = (region.bottom * sy).toInt().coerceIn(top + 1, frame.h)
         val w = right - left
         val h = bottom - top
         if (w < 8 || h < 8) return null
@@ -289,8 +305,6 @@ class ScreenService : Service() {
             val b = c and 0xff
             lum[k] = (r * 299 + g * 587 + b * 114) / 1000
         }
-        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map {
-            Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
-        }
+        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map { toScreen(it, frame) }
     }
 }
