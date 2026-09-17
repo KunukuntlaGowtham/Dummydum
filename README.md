@@ -28,8 +28,9 @@ whatever app you install it from.
 3. Either tap the floating **TICK** button while the other app is open, or use
    *3. Tick in 5 seconds* and switch to the other app during the countdown.
 
-Auto mode (in the settings screen) ticks whatever appears each time the screen changes.
-Holding the floating button saves a **scan report** instead — see below.
+The floating button is **START / STOP**. START keeps going by itself — tick a box, clear the
+pop-up, scroll on about 2 cm, tick the next — until you press STOP. Holding the button saves
+a **scan report** instead; see below.
 
 ## Settings
 
@@ -112,7 +113,7 @@ on to the next box.
 | --- | --- | --- |
 | Colour of the pop-up button | `#663398` | The colour to look for. Any hex value. |
 | Colour tolerance | 60 | How far each of red, green and blue may differ from it. Raise it if the button is shaded or has a gradient. |
-| Wait for the pop-up | 600 ms | How long the pop-up gets to appear, and to close again afterwards. |
+| Wait for the pop-up | see **Speed** | How long the pop-up gets to appear. |
 | Ignore the top % of the screen | 20 | That slice is never searched, so a coloured status bar, toolbar or header is never mistaken for the button. |
 
 This needs screen reading to be on. With it on, the screen-reading path also changes shape:
@@ -120,6 +121,26 @@ instead of finding every box in one picture and tapping through the list, it tic
 deals with the pop-up, then looks at the screen again for the next one — because a pop-up
 can move everything underneath it, and a list captured beforehand would go stale. A ticked
 box no longer looks empty, so it drops out of the next look by itself.
+
+## Running until you stop it
+
+START runs a cycle: tick one box → wait for the pop-up and tap its colour → scroll on →
+look again. It does not stop when it runs out of boxes, it scrolls and keeps looking, so a
+long list is worked through on its own. Press STOP (the same floating button, red while it
+runs) when you are done; *Stop now* in the app does the same.
+
+Each round takes as long as you allow it:
+
+| Setting | Default | What it waits for |
+| --- | --- | --- |
+| After ticking a box | 300 ms | The pop-up to appear. |
+| After clearing the pop-up | 300 ms | The pop-up to go away. |
+| After scrolling | 300 ms | The page to settle. |
+| Scroll each time | 20 mm | How far the swipe moves the page - 20 mm is about 2 cm. |
+
+So a box takes roughly a second by default. Lower the three waits for a faster run; raise
+them if the app is slow and a tick lands before the screen has caught up. They are plain
+milliseconds, so 1000 is one second and 2000 is two.
 
 ## Building locally
 

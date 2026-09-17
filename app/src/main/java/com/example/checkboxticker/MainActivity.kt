@@ -38,7 +38,10 @@ class MainActivity : Activity() {
     private lateinit var tapColour: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
-    private lateinit var popupInput: EditText
+    private lateinit var tickWaitInput: EditText
+    private lateinit var clearWaitInput: EditText
+    private lateinit var scrollWaitInput: EditText
+    private lateinit var scrollMmInput: EditText
     private lateinit var skipTopInput: EditText
     private lateinit var gapInput: EditText
     private lateinit var maxInput: EditText
@@ -92,8 +95,9 @@ class MainActivity : Activity() {
         root.addView(bubble)
         root.addView(auto)
         root.addView(pixels)
-        root.addView(note("Tap the floating button to tick now. Hold it to save a scan report " +
-                "of whatever is on screen - that is how to find out why a screen is not being ticked."))
+        root.addView(note("The floating button is START and STOP. START keeps going by itself - " +
+                "tick a box, clear the pop-up, scroll on a little, tick the next - until you " +
+                "press STOP. Hold the button instead to save a scan report of what is on screen."))
 
         root.addView(label("Gap between taps (ms)"))
         gapInput = number(p.getInt("gapMs", 250))
@@ -121,13 +125,29 @@ class MainActivity : Activity() {
         tolInput = number(p.getInt("colourTol", 60))
         root.addView(tolInput)
 
-        root.addView(label("Wait for the pop-up (ms)"))
-        popupInput = number(p.getInt("popupMs", 600))
-        root.addView(popupInput)
-
         root.addView(label("Ignore the top % of the screen"))
         skipTopInput = number(p.getInt("skipTopPct", 20))
         root.addView(skipTopInput)
+
+        root.addView(heading("Speed"))
+        root.addView(note("Milliseconds. 1000 is one second - lower is faster, but a screen " +
+                "that has not caught up yet gets ticked in the wrong place."))
+
+        root.addView(label("After ticking a box (waits for the pop-up)"))
+        tickWaitInput = number(p.getInt("tickWaitMs", 300))
+        root.addView(tickWaitInput)
+
+        root.addView(label("After clearing the pop-up"))
+        clearWaitInput = number(p.getInt("clearWaitMs", 300))
+        root.addView(clearWaitInput)
+
+        root.addView(label("After scrolling"))
+        scrollWaitInput = number(p.getInt("scrollWaitMs", 300))
+        root.addView(scrollWaitInput)
+
+        root.addView(label("Scroll each time (mm)"))
+        scrollMmInput = number(p.getInt("scrollMm", 20))
+        root.addView(scrollMmInput)
 
         root.addView(button("2. Save settings") {
             save()
@@ -150,15 +170,19 @@ class MainActivity : Activity() {
 
         root.addView(button("Show last scan report") { showReport() })
 
-        root.addView(button("3. Tick in 5 seconds (open your app now)") {
+        root.addView(button("3. Start in 5 seconds (open your app now)") {
             save()
             if (CheckboxService.instance == null) {
                 toast("Do step 1 first")
             } else {
                 toast("Open the app with the checkboxes")
                 moveTaskToBack(true)
-                main.postDelayed({ CheckboxService.instance?.tickAll(false) }, 5000L)
+                main.postDelayed({ CheckboxService.instance?.startLoop() }, 5000L)
             }
+        })
+
+        root.addView(button("Stop now") {
+            CheckboxService.instance?.stopLoop("Stopped")
         })
 
         setContentView(ScrollView(this).apply { addView(root) })
@@ -169,7 +193,8 @@ class MainActivity : Activity() {
         val service = CheckboxService.instance
         status.text = "Service: ${if (service != null) "on" else "off"}\n" +
                 "Auto ticking: ${if (service?.isAutoOn() == true) "on" else "off"}\n" +
-                "Screen reading: ${if (ScreenService.instance != null) "on" else "off"}"
+                "Screen reading: ${if (ScreenService.instance != null) "on" else "off"}\n" +
+                "Now: ${if (service?.isLooping() == true) "running" else "stopped"}"
     }
 
     private fun save() {
@@ -186,7 +211,10 @@ class MainActivity : Activity() {
             .putBoolean("tapColour", tapColour.isChecked)
             .putInt("colour", parseColour(colourInput.text.toString()))
             .putInt("colourTol", tolInput.text.toString().toIntOrNull()?.coerceIn(0, 200) ?: 60)
-            .putInt("popupMs", popupInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 600)
+            .putInt("tickWaitMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
+            .putInt("clearWaitMs", clearWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
+            .putInt("scrollWaitMs", scrollWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
+            .putInt("scrollMm", scrollMmInput.text.toString().toIntOrNull()?.coerceIn(1, 200) ?: 20)
             .putInt("skipTopPct", skipTopInput.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 20)
             .apply()
         CheckboxService.instance?.applySettings()

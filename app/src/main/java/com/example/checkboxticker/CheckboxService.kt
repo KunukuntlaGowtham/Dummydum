@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -50,6 +51,9 @@ class CheckboxService : AccessibilityService() {
     private var bubbleParams: WindowManager.LayoutParams? = null
 
     private var running = false
+    private var looping = false
+    private var ticked = 0
+    private var lastBox: Rect? = null
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -65,6 +69,7 @@ class CheckboxService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onUnbind(intent: Intent?): Boolean {
+        looping = false
         hideBubble()
         instance = null
         return super.onUnbind(intent)
@@ -138,6 +143,136 @@ class CheckboxService : AccessibilityService() {
         silentRun = fromAuto
         updateBubble()
         tickNext(targets, 0, gap, 0)
+    }
+
+    // ---------------------------------------------------------------- start / stop
+
+    fun isLooping() = looping
+
+    fun toggleLoop() {
+        if (looping) stopLoop("Stopped") else startLoop()
+    }
+
+    /** Tick a box, clear its pop-up, scroll on a little, and keep going until STOP. */
+    fun startLoop() {
+        if (looping) return
+        looping = true
+        running = true
+        silentRun = false
+        ticked = 0
+        lastBox = null
+        updateBubble()
+        toast("Running - press STOP to finish")
+        step()
+    }
+
+    fun stopLoop(why: String) {
+        if (!looping) return
+        looping = false
+        running = false
+        lastBox = null
+        updateBubble()
+        toast("$why after $ticked")
+    }
+
+    private fun step() {
+        if (!looping) return
+        tickOne { didTick ->
+            if (!looping) return@tickOne
+            val p = prefs()
+            if (didTick) afterTick { if (looping) scrollOn(p) } else scrollOn(p)
+        }
+    }
+
+    private fun scrollOn(p: SharedPreferences) {
+        scrollScreen(p.getInt("scrollMm", 20))
+        lastBox = null          // after a scroll the same spot holds a different box
+        main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
+    }
+
+    /** Ticks a single box - from the tree when it is published, by sight when it is not. */
+    private fun tickOne(done: (Boolean) -> Unit) {
+        val p = prefs()
+        val rules = Rules(
+            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
+            switches = p.getBoolean("switches", true),
+            radios = p.getBoolean("radios", false),
+            loose = p.getBoolean("loose", true)
+        )
+
+        val targets = ArrayList<AccessibilityNodeInfo>()
+        for (root in roots()) {
+            collect(root, targets, rules, 1)
+            if (targets.isNotEmpty()) break
+        }
+
+        if (targets.isNotEmpty()) {
+            val node = targets[0]
+            val before = if (node.isCheckable) node.isChecked else null
+            var ok = clickNode(node)
+            if (!ok) ok = gestureTap(node)
+            if (ok) ticked++
+            main.postDelayed({
+                if (ok && before != null && !stateChanged(node, before)) gestureTap(node)
+                done(ok)
+            }, waitMs(p, "tickWaitMs", 300))
+            return
+        }
+
+        val screen = ScreenService.instance
+        if (!p.getBoolean("pixels", true) || screen == null) {
+            done(false)
+            return
+        }
+
+        screen.findBoxes(dp(14), dp(48)) { boxes ->
+            val box = boxes.firstOrNull { it != lastBox && !hitsBubble(it) }
+            if (box == null) {
+                done(false)
+            } else {
+                showMarkers(listOf(box))
+                val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+                if (ok) ticked++
+                lastBox = box
+                main.postDelayed({ done(ok) }, waitMs(p, "tickWaitMs", 300))
+            }
+        }
+    }
+
+    /** A short, controlled swipe up, so the page moves on by about [mm] millimetres. */
+    private fun scrollScreen(mm: Int) {
+        val metrics = resources.displayMetrics
+        val distance = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_MM, mm.coerceIn(1, 200).toFloat(), metrics
+        )
+        val x = metrics.widthPixels / 2f
+        val from = metrics.heightPixels * 0.7f
+        val to = (from - distance).coerceAtLeast(metrics.heightPixels * 0.1f)
+        try {
+            val path = Path().apply { moveTo(x, from); lineTo(x, to) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0L, 260L))
+                .build()
+            dispatchGesture(gesture, null, null)
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "scroll failed", e)
+        }
+    }
+
+    private fun waitMs(p: SharedPreferences, key: String, fallback: Int) =
+        p.getInt(key, fallback).coerceIn(0, 10000).toLong().coerceAtLeast(50L)
+
+    /** Our own button is on screen during a scan, so anything under it is not a checkbox. */
+    private fun hitsBubble(box: Rect): Boolean {
+        val view = bubble ?: return false
+        val where = IntArray(2)
+        view.getLocationOnScreen(where)
+        val pad = dp(8)
+        val mine = Rect(
+            where[0] - pad, where[1] - pad,
+            where[0] + view.width + pad, where[1] + view.height + pad
+        )
+        return Rect.intersects(mine, box)
     }
 
     /**
@@ -255,21 +390,17 @@ class CheckboxService : AccessibilityService() {
         val colour = p.getInt("colour", DEFAULT_COLOUR)
         val tolerance = p.getInt("colourTol", 60).coerceIn(0, 200)
         val skipTop = p.getInt("skipTopPct", 20).coerceIn(0, 90)
-        val wait = p.getInt("popupMs", 600).coerceIn(0, 5000).toLong()
 
-        main.postDelayed({
-            bubble?.visibility = View.INVISIBLE
-            screen.findColour(colour, tolerance, skipTop) { box ->
-                bubble?.visibility = View.VISIBLE
-                if (box == null) {
-                    next()
-                } else {
-                    showMarkers(listOf(box))
-                    gestureTap(box.exactCenterX(), box.exactCenterY())
-                    main.postDelayed({ next() }, wait)
-                }
+        // The pop-up has already had the after-a-tick wait to appear.
+        screen.findColour(colour, tolerance, skipTop) { box ->
+            if (box == null) {
+                next()
+            } else {
+                showMarkers(listOf(box))
+                gestureTap(box.exactCenterX(), box.exactCenterY())
+                main.postDelayed({ next() }, waitMs(p, "clearWaitMs", 300))
             }
-        }, wait)
+        }
     }
 
     /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
@@ -655,7 +786,7 @@ class CheckboxService : AccessibilityService() {
                             saveReport()
                             toast("Scan report saved - open the app to read it")
                         } else {
-                            tickAll(fromAuto = false)
+                            toggleLoop()
                         }
                     }
                     true
@@ -685,11 +816,11 @@ class CheckboxService : AccessibilityService() {
     }
 
     private fun updateBubble() {
-        bubble?.text = when {
-            running -> "TICKING…"
-            autoMode -> "AUTO ☑"
-            else -> "TICK ☑"
-        }
+        val view = bubble ?: return
+        view.text = if (looping) "STOP" else "START"
+        (view.background as? GradientDrawable)?.setColor(
+            if (looping) Color.argb(235, 205, 45, 45) else Color.argb(230, 33, 118, 255)
+        )
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
