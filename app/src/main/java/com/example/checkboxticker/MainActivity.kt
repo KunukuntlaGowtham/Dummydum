@@ -35,6 +35,11 @@ class MainActivity : Activity() {
     private lateinit var bubble: CheckBox
     private lateinit var auto: CheckBox
     private lateinit var pixels: CheckBox
+    private lateinit var tapColour: CheckBox
+    private lateinit var colourInput: EditText
+    private lateinit var tolInput: EditText
+    private lateinit var popupInput: EditText
+    private lateinit var skipTopInput: EditText
     private lateinit var gapInput: EditText
     private lateinit var maxInput: EditText
 
@@ -98,6 +103,32 @@ class MainActivity : Activity() {
         maxInput = number(p.getInt("maxTicks", 50))
         root.addView(maxInput)
 
+        root.addView(heading("After each tick"))
+        tapColour = check("A pop-up appears - tap its colour", p.getBoolean("tapColour", true))
+        root.addView(tapColour)
+        root.addView(note("Needs screen reading. After every box is ticked the pop-up is waited " +
+                "for, the biggest patch of this colour is tapped, and only then does the next " +
+                "box get ticked."))
+
+        root.addView(label("Colour of the pop-up button"))
+        colourInput = EditText(this).apply {
+            setText(String.format("#%06X", p.getInt("colour", CheckboxService.DEFAULT_COLOUR)))
+            layoutParams = LinearLayout.LayoutParams(dp(140), ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        root.addView(colourInput)
+
+        root.addView(label("Colour tolerance"))
+        tolInput = number(p.getInt("colourTol", 60))
+        root.addView(tolInput)
+
+        root.addView(label("Wait for the pop-up (ms)"))
+        popupInput = number(p.getInt("popupMs", 600))
+        root.addView(popupInput)
+
+        root.addView(label("Ignore the top % of the screen"))
+        skipTopInput = number(p.getInt("skipTopPct", 20))
+        root.addView(skipTopInput)
+
         root.addView(button("2. Save settings") {
             save()
             toast("Saved")
@@ -152,6 +183,11 @@ class MainActivity : Activity() {
             .putBoolean("pixels", pixels.isChecked)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
+            .putBoolean("tapColour", tapColour.isChecked)
+            .putInt("colour", parseColour(colourInput.text.toString()))
+            .putInt("colourTol", tolInput.text.toString().toIntOrNull()?.coerceIn(0, 200) ?: 60)
+            .putInt("popupMs", popupInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 600)
+            .putInt("skipTopPct", skipTopInput.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 20)
             .apply()
         CheckboxService.instance?.applySettings()
     }
@@ -205,6 +241,12 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Close", null)
             .show()
+    }
+
+    private fun parseColour(text: String): Int {
+        val cleaned = text.trim().removePrefix("#").removePrefix("0x")
+        val value = cleaned.toIntOrNull(16) ?: return CheckboxService.DEFAULT_COLOUR
+        return value and 0xFFFFFF
     }
 
     // ---------------------------------------------------------------- widgets

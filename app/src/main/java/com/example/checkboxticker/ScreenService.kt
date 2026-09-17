@@ -166,8 +166,31 @@ class ScreenService : Service() {
         }
     }
 
-    private fun detect(minPx: Int, maxPx: Int): List<Rect> {
-        val imageReader = reader ?: return emptyList()
+    /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
+    fun findColour(target: Int, tolerance: Int, skipTopPct: Int, done: (Rect?) -> Unit) {
+        worker.post {
+            val box = try {
+                val frame = grab()
+                if (frame == null) {
+                    null
+                } else {
+                    val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
+                    BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
+                        ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "colour scan failed", t)
+                null
+            }
+            main.post { done(box) }
+        }
+    }
+
+    private class Frame(val rgb: IntArray, val w: Int, val h: Int)
+
+    /** One frame of the screen as plain colours. */
+    private fun grab(): Frame? {
+        val imageReader = reader ?: return null
 
         var image = imageReader.acquireLatestImage()
         var tries = 0
@@ -176,7 +199,7 @@ class ScreenService : Service() {
             image = imageReader.acquireLatestImage()
             tries++
         }
-        if (image == null) return emptyList()
+        if (image == null) return null
 
         try {
             val plane = image.planes[0]
@@ -188,7 +211,7 @@ class ScreenService : Service() {
             val w = image.width
             val h = image.height
 
-            val lum = IntArray(w * h)
+            val rgb = IntArray(w * h)
             for (y in 0 until h) {
                 var i = y * rowStride
                 val row = y * w
@@ -197,16 +220,28 @@ class ScreenService : Service() {
                     val r = bytes[i].toInt() and 0xff
                     val g = bytes[i + 1].toInt() and 0xff
                     val b = bytes[i + 2].toInt() and 0xff
-                    lum[row + x] = (r * 299 + g * 587 + b * 114) / 1000
+                    rgb[row + x] = (r shl 16) or (g shl 8) or b
                     i += pixelStride
                 }
             }
-
-            return BoxFinder.find(lum, w, h, minPx, maxPx).map {
-                Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
-            }
+            return Frame(rgb, w, h)
         } finally {
             image.close()
+        }
+    }
+
+    private fun detect(minPx: Int, maxPx: Int): List<Rect> {
+        val frame = grab() ?: return emptyList()
+        val lum = IntArray(frame.rgb.size)
+        for (k in frame.rgb.indices) {
+            val c = frame.rgb[k]
+            val r = (c shr 16) and 0xff
+            val g = (c shr 8) and 0xff
+            val b = c and 0xff
+            lum[k] = (r * 299 + g * 587 + b * 114) / 1000
+        }
+        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map {
+            Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
         }
     }
 }

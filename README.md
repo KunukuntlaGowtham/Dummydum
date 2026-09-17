@@ -101,6 +101,26 @@ Notes:
 * Android shows a screen-capture notice while it is on; the permission ends when you
   reboot or swipe the notification's service away.
 
+## Pop-ups between ticks
+
+Some apps answer every tick with a pop-up that has to be dismissed before the next box can
+be ticked. **After each tick → "A pop-up appears - tap its colour"** handles that: it waits
+for the pop-up, finds the biggest patch of a colour you choose, taps it, and only then goes
+on to the next box.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Colour of the pop-up button | `#663398` | The colour to look for. Any hex value. |
+| Colour tolerance | 60 | How far each of red, green and blue may differ from it. Raise it if the button is shaded or has a gradient. |
+| Wait for the pop-up | 600 ms | How long the pop-up gets to appear, and to close again afterwards. |
+| Ignore the top % of the screen | 20 | That slice is never searched, so a coloured status bar, toolbar or header is never mistaken for the button. |
+
+This needs screen reading to be on. With it on, the screen-reading path also changes shape:
+instead of finding every box in one picture and tapping through the list, it ticks one box,
+deals with the pop-up, then looks at the screen again for the next one — because a pop-up
+can move everything underneath it, and a list captured beforehand would go stale. A ticked
+box no longer looks empty, so it drops out of the next look by itself.
+
 ## Building locally
 
 ```

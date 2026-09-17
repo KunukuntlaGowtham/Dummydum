@@ -39,6 +39,7 @@ class CheckboxService : AccessibilityService() {
     companion object {
         const val PREFS = "cfg"
         const val REPORT_FILE = "scan_report.txt"
+        const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
         @Volatile
         var instance: CheckboxService? = null
     }
@@ -153,8 +154,18 @@ class CheckboxService : AccessibilityService() {
         running = true
         silentRun = fromAuto
         updateBubble()
-        bubble?.visibility = View.INVISIBLE   // keep our own button out of the picture
 
+        // A pop-up after every tick can move the rest of the page, so in that mode the
+        // screen is looked at again before each box instead of trusting the first picture.
+        if (popupExpected()) oneAtATime(0, null) else allAtOnce(fromAuto)
+    }
+
+    private fun popupExpected() =
+        prefs().getBoolean("tapColour", true) && ScreenService.instance != null
+
+    private fun allAtOnce(fromAuto: Boolean) {
+        val screen = ScreenService.instance ?: return finishRun(0)
+        bubble?.visibility = View.INVISIBLE   // keep our own button out of the picture
         main.postDelayed({
             screen.findBoxes(dp(14), dp(48)) { boxes ->
                 bubble?.visibility = View.VISIBLE
@@ -173,18 +184,92 @@ class CheckboxService : AccessibilityService() {
 
     private fun tapNext(boxes: List<Rect>, i: Int, gap: Int, done: Int) {
         if (i >= boxes.size) {
-            running = false
-            lastAutoRun = SystemClock.uptimeMillis()
-            updateBubble()
-            if (!silentRun || done > 0) toast("Tapped $done box(es) on screen")
+            finishRun(done)
             return
         }
         val box = boxes[i]
         val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
         main.postDelayed(
-            { tapNext(boxes, i + 1, gap, done + if (ok) 1 else 0) },
+            { afterTick { tapNext(boxes, i + 1, gap, done + if (ok) 1 else 0) } },
             gap.toLong().coerceAtLeast(60L)
         )
+    }
+
+    /**
+     * Tick one box, deal with its pop-up, look at the screen again, tick the next. A ticked
+     * box stops looking empty, so it drops out of the next look by itself; [last] only
+     * guards against a box that refuses to be ticked holding the run up for ever.
+     */
+    private fun oneAtATime(done: Int, last: Rect?) {
+        val screen = ScreenService.instance ?: return finishRun(done)
+        val p = prefs()
+        val max = p.getInt("maxTicks", 50).coerceIn(1, 500)
+        if (done >= max) {
+            finishRun(done)
+            return
+        }
+
+        bubble?.visibility = View.INVISIBLE
+        main.postDelayed({
+            screen.findBoxes(dp(14), dp(48)) { boxes ->
+                bubble?.visibility = View.VISIBLE
+                val box = boxes.firstOrNull { it != last }
+                if (box == null) {
+                    finishRun(done)
+                } else {
+                    showMarkers(listOf(box))
+                    val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+                    val gap = p.getInt("gapMs", 250).coerceIn(0, 5000).toLong().coerceAtLeast(60L)
+                    main.postDelayed(
+                        { afterTick { oneAtATime(done + if (ok) 1 else 0, box) } },
+                        gap
+                    )
+                }
+            }
+        }, 150L)
+    }
+
+    private fun finishRun(done: Int) {
+        running = false
+        lastAutoRun = SystemClock.uptimeMillis()
+        updateBubble()
+        if (!silentRun || done > 0) {
+            toast(if (done == 0) "No empty box found on the screen" else "Ticked $done on screen")
+        }
+    }
+
+    /**
+     * Some apps answer a tick with a pop-up that has to be dealt with before the next box
+     * can be ticked. This waits for it, taps the coloured button in it, and only then lets
+     * the run carry on. The top slice of the screen is left alone throughout, so a coloured
+     * status bar or header is never mistaken for the button.
+     */
+    private fun afterTick(next: () -> Unit) {
+        val p = prefs()
+        val screen = ScreenService.instance
+        if (!p.getBoolean("tapColour", true) || screen == null) {
+            next()
+            return
+        }
+
+        val colour = p.getInt("colour", DEFAULT_COLOUR)
+        val tolerance = p.getInt("colourTol", 60).coerceIn(0, 200)
+        val skipTop = p.getInt("skipTopPct", 20).coerceIn(0, 90)
+        val wait = p.getInt("popupMs", 600).coerceIn(0, 5000).toLong()
+
+        main.postDelayed({
+            bubble?.visibility = View.INVISIBLE
+            screen.findColour(colour, tolerance, skipTop) { box ->
+                bubble?.visibility = View.VISIBLE
+                if (box == null) {
+                    next()
+                } else {
+                    showMarkers(listOf(box))
+                    gestureTap(box.exactCenterX(), box.exactCenterY())
+                    main.postDelayed({ next() }, wait)
+                }
+            }
+        }, wait)
     }
 
     /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
@@ -356,7 +441,7 @@ class CheckboxService : AccessibilityService() {
             var worked = ok
             // A web page can swallow the click, so make sure the box really changed.
             if (ok && before != null && !stateChanged(node, before)) worked = gestureTap(node)
-            tickNext(targets, i + 1, gap, done + if (worked) 1 else 0)
+            afterTick { tickNext(targets, i + 1, gap, done + if (worked) 1 else 0) }
         }, gap.toLong().coerceAtLeast(60L))
     }
 

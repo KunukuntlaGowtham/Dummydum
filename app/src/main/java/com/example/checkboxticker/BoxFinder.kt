@@ -142,6 +142,67 @@ object BoxFinder {
         return total > 0 && edges * 100 / total < 12 && hi - lo < 48
     }
 
+    /**
+     * The biggest patch of one colour below [minY] - the coloured button in a pop-up.
+     * Returns null when no patch is big enough to be worth tapping.
+     */
+    fun findColour(rgb: IntArray, w: Int, h: Int, target: Int, tol: Int, minY: Int): Rect? {
+        val size = w * h
+        if (size == 0) return null
+
+        val tr = (target shr 16) and 0xff
+        val tg = (target shr 8) and 0xff
+        val tb = target and 0xff
+
+        val match = BooleanArray(size)
+        val from = (minY.coerceIn(0, h)) * w
+        for (k in from until size) {
+            val c = rgb[k]
+            if (abs(((c shr 16) and 0xff) - tr) <= tol &&
+                abs(((c shr 8) and 0xff) - tg) <= tol &&
+                abs((c and 0xff) - tb) <= tol
+            ) match[k] = true
+        }
+
+        val seen = BooleanArray(size)
+        val stack = IntArray(size)
+        var best: Rect? = null
+        var bestCount = 0
+
+        for (start in from until size) {
+            if (!match[start] || seen[start]) continue
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var count = 0
+            var minX = w
+            var maxX = 0
+            var top = h
+            var bottom = 0
+
+            while (sp > 0) {
+                val idx = stack[--sp]
+                val x = idx % w
+                val y = idx / w
+                count++
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < top) top = y
+                if (y > bottom) bottom = y
+                if (x + 1 < w && match[idx + 1] && !seen[idx + 1]) { seen[idx + 1] = true; stack[sp++] = idx + 1 }
+                if (x > 0 && match[idx - 1] && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
+                if (idx + w < size && match[idx + w] && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
+                if (idx - w >= from && match[idx - w] && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
+            }
+
+            if (count > bestCount && count >= 25) {
+                bestCount = count
+                best = Rect(minX, top, maxX + 1, bottom + 1)
+            }
+        }
+        return best
+    }
+
     private fun dedupe(list: List<Rect>): List<Rect> {
         val out = ArrayList<Rect>()
         for (rect in list.sortedBy { it.top }) {
