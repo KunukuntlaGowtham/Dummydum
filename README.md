@@ -79,9 +79,27 @@ Three shapes of answer:
 * *the window is not listed at all* — the content is in a window the service was not
   reading. Every window is now scanned, not just the focused one, which is the fix for this.
 
-Still out of reach: a UI painted on a canvas (Flutter web's default renderer, WebGL, Unity),
-which publishes no nodes at all. That needs screen capture and pixel matching rather than
-the node tree.
+## Apps that publish nothing
+
+Some screens expose no accessibility tree at all: a UI painted on a canvas (Flutter web's
+default renderer, WebGL, Unity), or a WebView an app has locked down. No amount of node
+walking reaches those, so there is a second path that does not use the tree.
+
+Press **Allow screen reading (works in any app)** and grant the screen-capture prompt. When
+a run finds nothing in the tree, Checkbox Ticker grabs one frame instead and looks for what
+an empty checkbox looks like: a small, roughly square outline with a flat, empty middle.
+Each one it finds is ringed in green for a moment and tapped by coordinate.
+
+A ticked box is filled in, so it fails the "empty middle" test and is left alone — which is
+how a second run does not undo the first.
+
+Notes:
+
+* The frame is measured on the phone and dropped. Nothing is stored and nothing is sent.
+* Screen reading is used only on a run you ask for (the floating button, or *Tick in
+  5 seconds*), never by auto mode, which would tap wildly on every screen change.
+* Android shows a screen-capture notice while it is on; the permission ends when you
+  reboot or swipe the notification's service away.
 
 ## Building locally
 

@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -32,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var loose: CheckBox
     private lateinit var bubble: CheckBox
     private lateinit var auto: CheckBox
+    private lateinit var pixels: CheckBox
     private lateinit var gapInput: EditText
     private lateinit var maxInput: EditText
 
@@ -80,8 +83,10 @@ class MainActivity : Activity() {
         root.addView(heading("How it runs"))
         bubble = check("Show the floating TICK button", p.getBoolean("bubble", true))
         auto = check("Auto-tick whenever the screen changes", p.getBoolean("auto", false))
+        pixels = check("Read the screen when an app hides its checkboxes", p.getBoolean("pixels", true))
         root.addView(bubble)
         root.addView(auto)
+        root.addView(pixels)
         root.addView(note("Tap the floating button to tick now. Hold it to save a scan report " +
                 "of whatever is on screen - that is how to find out why a screen is not being ticked."))
 
@@ -97,6 +102,20 @@ class MainActivity : Activity() {
             save()
             toast("Saved")
         })
+
+        root.addView(button("Allow screen reading (works in any app)") {
+            save()
+            if (Build.VERSION.SDK_INT >= 33) {
+                requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
+            }
+            val projection = getSystemService(MediaProjectionManager::class.java)
+            @Suppress("DEPRECATION")
+            startActivityForResult(projection.createScreenCaptureIntent(), 1)
+        })
+
+        root.addView(note("With screen reading on, a screen that publishes nothing is still " +
+                "handled: the empty boxes are spotted by how they look and tapped. Nothing " +
+                "leaves the phone - a frame is measured and dropped."))
 
         root.addView(button("Show last scan report") { showReport() })
 
@@ -118,7 +137,8 @@ class MainActivity : Activity() {
         super.onResume()
         val service = CheckboxService.instance
         status.text = "Service: ${if (service != null) "on" else "off"}\n" +
-                "Auto ticking: ${if (service?.isAutoOn() == true) "on" else "off"}"
+                "Auto ticking: ${if (service?.isAutoOn() == true) "on" else "off"}\n" +
+                "Screen reading: ${if (ScreenService.instance != null) "on" else "off"}"
     }
 
     private fun save() {
@@ -129,10 +149,28 @@ class MainActivity : Activity() {
             .putBoolean("loose", loose.isChecked)
             .putBoolean("bubble", bubble.isChecked)
             .putBoolean("auto", auto.isChecked)
+            .putBoolean("pixels", pixels.isChecked)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .apply()
         CheckboxService.instance?.applySettings()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 1) return
+        if (resultCode != RESULT_OK || data == null) {
+            toast("Screen reading was not allowed")
+            return
+        }
+        startForegroundService(
+            Intent(this, ScreenService::class.java)
+                .putExtra("code", resultCode)
+                .putExtra("data", data)
+        )
+        toast("Screen reading is on")
     }
 
     /** Shows what the service could see the last time a screen was scanned. */

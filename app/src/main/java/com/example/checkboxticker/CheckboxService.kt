@@ -4,7 +4,9 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -16,6 +18,7 @@ import android.os.SystemClock
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -114,9 +117,18 @@ class CheckboxService : AccessibilityService() {
         for (root in roots) collect(root, targets, rules, max)
 
         if (targets.isEmpty()) {
+            // Nothing in the tree: look at the screen itself instead. Only on a run you
+            // asked for - guessing from pixels on every screen change would tap wildly.
+            if (!fromAuto && p.getBoolean("pixels", true) && ScreenService.instance != null) {
+                tickByPixels(fromAuto)
+                return
+            }
             if (!fromAuto) {
                 saveReport()
-                toast("No checkbox found - scan report saved, open the app to read it")
+                toast(
+                    if (roots.isEmpty()) "This app shows nothing to read - turn on screen reading in the app"
+                    else "No checkbox found - scan report saved, open the app to read it"
+                )
             }
             return
         }
@@ -125,6 +137,90 @@ class CheckboxService : AccessibilityService() {
         silentRun = fromAuto
         updateBubble()
         tickNext(targets, 0, gap, 0)
+    }
+
+    /**
+     * The fallback that needs no accessibility tree at all: take a picture of the screen,
+     * find the empty boxes on it, and tap where they are.
+     */
+    private fun tickByPixels(fromAuto: Boolean) {
+        val screen = ScreenService.instance
+        if (screen == null) {
+            if (!fromAuto) toast("Turn on screen reading in the app first")
+            return
+        }
+
+        running = true
+        silentRun = fromAuto
+        updateBubble()
+        bubble?.visibility = View.INVISIBLE   // keep our own button out of the picture
+
+        main.postDelayed({
+            screen.findBoxes(dp(14), dp(48)) { boxes ->
+                bubble?.visibility = View.VISIBLE
+                if (boxes.isEmpty()) {
+                    running = false
+                    updateBubble()
+                    if (!fromAuto) toast("No empty box found on the screen")
+                } else {
+                    showMarkers(boxes)
+                    val gap = prefs().getInt("gapMs", 250).coerceIn(0, 5000)
+                    tapNext(boxes, 0, gap, 0)
+                }
+            }
+        }, 150L)
+    }
+
+    private fun tapNext(boxes: List<Rect>, i: Int, gap: Int, done: Int) {
+        if (i >= boxes.size) {
+            running = false
+            lastAutoRun = SystemClock.uptimeMillis()
+            updateBubble()
+            if (!silentRun || done > 0) toast("Tapped $done box(es) on screen")
+            return
+        }
+        val box = boxes[i]
+        val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+        main.postDelayed(
+            { tapNext(boxes, i + 1, gap, done + if (ok) 1 else 0) },
+            gap.toLong().coerceAtLeast(60L)
+        )
+    }
+
+    /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
+    private fun showMarkers(boxes: List<Rect>) {
+        val manager = windowManager ?: return
+        val view = MarkerView(this, boxes)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        try {
+            manager.addView(view, params)
+        } catch (e: Exception) {
+            return
+        }
+        main.postDelayed({
+            try { manager.removeView(view) } catch (e: Exception) { }
+        }, 1200L)
+    }
+
+    private class MarkerView(ctx: Context, private val boxes: List<Rect>) : View(ctx) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+            color = Color.argb(235, 0, 200, 90)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            for (box in boxes) canvas.drawRect(box, paint)
+        }
     }
 
     /**
