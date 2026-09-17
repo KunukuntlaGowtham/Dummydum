@@ -1,8 +1,10 @@
 package com.example.checkboxticker
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -80,7 +82,8 @@ class MainActivity : Activity() {
         auto = check("Auto-tick whenever the screen changes", p.getBoolean("auto", false))
         root.addView(bubble)
         root.addView(auto)
-        root.addView(note("Tap the floating button to tick now, hold it to switch auto on or off."))
+        root.addView(note("Tap the floating button to tick now. Hold it to save a scan report " +
+                "of whatever is on screen - that is how to find out why a screen is not being ticked."))
 
         root.addView(label("Gap between taps (ms)"))
         gapInput = number(p.getInt("gapMs", 250))
@@ -94,6 +97,8 @@ class MainActivity : Activity() {
             save()
             toast("Saved")
         })
+
+        root.addView(button("Show last scan report") { showReport() })
 
         root.addView(button("3. Tick in 5 seconds (open your app now)") {
             save()
@@ -128,6 +133,40 @@ class MainActivity : Activity() {
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .apply()
         CheckboxService.instance?.applySettings()
+    }
+
+    /** Shows what the service could see the last time a screen was scanned. */
+    private fun showReport() {
+        val text = try {
+            openFileInput(CheckboxService.REPORT_FILE).bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            ""
+        }
+        if (text.isBlank()) {
+            toast("Hold the floating button on the screen that is not working first")
+            return
+        }
+
+        val body = TextView(this).apply {
+            this.text = text
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("What the service sees")
+            .setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton("Share") { _, _ ->
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Checkbox Ticker scan report")
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                startActivity(Intent.createChooser(send, "Send scan report"))
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     // ---------------------------------------------------------------- widgets

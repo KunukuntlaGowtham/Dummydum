@@ -19,6 +19,7 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
@@ -34,6 +35,7 @@ class CheckboxService : AccessibilityService() {
 
     companion object {
         const val PREFS = "cfg"
+        const val REPORT_FILE = "scan_report.txt"
         @Volatile
         var instance: CheckboxService? = null
     }
@@ -92,13 +94,9 @@ class CheckboxService : AccessibilityService() {
     /** Ticks every checkbox currently on screen, one after another. */
     fun tickAll(fromAuto: Boolean) {
         if (running) return
-        val root = rootInActiveWindow
-        if (root == null) {
-            if (!fromAuto) toast("Cannot read the screen right now")
-            return
-        }
-        if (root.packageName?.toString() == packageName) {
-            if (!fromAuto) toast("Switch to the app you want ticked first")
+        val roots = roots()
+        if (roots.isEmpty()) {
+            if (!fromAuto) toast("Nothing to read - switch to the app you want ticked")
             return
         }
 
@@ -113,10 +111,13 @@ class CheckboxService : AccessibilityService() {
         val max = p.getInt("maxTicks", 50).coerceIn(1, 500)
 
         val targets = ArrayList<AccessibilityNodeInfo>()
-        collect(root, targets, rules, max)
+        for (root in roots) collect(root, targets, rules, max)
 
         if (targets.isEmpty()) {
-            if (!fromAuto) toast("No checkbox found on this screen")
+            if (!fromAuto) {
+                saveReport()
+                toast("No checkbox found - scan report saved, open the app to read it")
+            }
             return
         }
 
@@ -124,6 +125,29 @@ class CheckboxService : AccessibilityService() {
         silentRun = fromAuto
         updateBubble()
         tickNext(targets, 0, gap, 0)
+    }
+
+    /**
+     * Every window worth reading, not only the focused one - an in-app browser, a bottom
+     * sheet or a dialog often lives in a window of its own.
+     */
+    private fun roots(): List<AccessibilityNodeInfo> {
+        val out = ArrayList<AccessibilityNodeInfo>()
+        try {
+            for (window in windows) {
+                if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                val root = window.root ?: continue
+                if (root.packageName?.toString() == packageName) continue
+                out.add(root)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "window list failed", e)
+        }
+        if (out.isEmpty()) {
+            val root = rootInActiveWindow
+            if (root != null && root.packageName?.toString() != packageName) out.add(root)
+        }
+        return out
     }
 
     private data class Rules(
@@ -281,6 +305,102 @@ class CheckboxService : AccessibilityService() {
         false
     }
 
+    // ---------------------------------------------------------------- scan report
+
+    private class Stats {
+        var nodes = 0
+        var checkable = 0
+        var clickable = 0
+        var webNodes = 0
+        var webViews = 0
+        val samples = ArrayList<String>()
+    }
+
+    /**
+     * Writes down everything the service can see on the screen in front, so a screen where
+     * nothing gets ticked can be looked at instead of guessed about.
+     */
+    fun buildReport(): String {
+        val sb = StringBuilder()
+        sb.append("Checkbox Ticker scan report\n")
+        sb.append("android ").append(Build.VERSION.SDK_INT)
+            .append(" / ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n")
+
+        val list = try { windows } catch (e: Exception) { emptyList<AccessibilityWindowInfo>() }
+        sb.append("windows: ").append(list.size).append("\n")
+
+        val roots = ArrayList<Pair<String, AccessibilityNodeInfo>>()
+        for (window in list) {
+            val root = window.root
+            val label = "window type=${window.type} active=${window.isActive} pkg=${root?.packageName ?: "?"}"
+            if (root == null) {
+                sb.append("\n").append(label).append("\n  no root - this window does not publish its content\n")
+            } else {
+                roots.add(label to root)
+            }
+        }
+        if (roots.isEmpty()) {
+            rootInActiveWindow?.let { roots.add("active window pkg=${it.packageName}" to it) }
+        }
+
+        for ((label, root) in roots) {
+            val stats = Stats()
+            walk(root, stats, false)
+            sb.append("\n").append(label).append("\n")
+            sb.append("  nodes=").append(stats.nodes)
+                .append(" checkable=").append(stats.checkable)
+                .append(" clickable=").append(stats.clickable)
+                .append(" webviews=").append(stats.webViews)
+                .append(" nodesInWeb=").append(stats.webNodes).append("\n")
+            if (stats.samples.isEmpty()) {
+                sb.append("  no checkable or tappable web node found\n")
+            } else {
+                for (line in stats.samples) sb.append(line).append("\n")
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun walk(node: AccessibilityNodeInfo?, stats: Stats, inWeb: Boolean) {
+        if (node == null || stats.nodes >= 4000) return
+        stats.nodes++
+
+        val cls = (node.className ?: "").toString()
+        val isWebView = cls.contains("WebView")
+        if (isWebView) stats.webViews++
+        val web = inWeb || isWebView
+        if (web) stats.webNodes++
+        if (node.isCheckable) stats.checkable++
+        if (node.isClickable) stats.clickable++
+
+        if ((node.isCheckable || (web && node.isClickable)) && stats.samples.size < 40) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            stats.samples.add(
+                "  " + cls.substringAfterLast('.') +
+                        " chk=" + node.isCheckable + "/" + node.isChecked +
+                        " clk=" + node.isClickable +
+                        " web=" + web +
+                        " " + bounds.width() + "x" + bounds.height() +
+                        " id=" + (node.viewIdResourceName ?: "-") +
+                        " txt=" + (node.text ?: "").toString().take(24) +
+                        " desc=" + (node.contentDescription ?: "").toString().take(24)
+            )
+        }
+
+        for (i in 0 until node.childCount) walk(node.getChild(i), stats, web)
+    }
+
+    private fun saveReport() {
+        val text = buildReport()
+        android.util.Log.i("CheckboxTicker", text)
+        try {
+            openFileOutput(REPORT_FILE, Context.MODE_PRIVATE).use { it.write(text.toByteArray()) }
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "could not save report", e)
+        }
+    }
+
     // ---------------------------------------------------------------- bubble
 
     private fun dp(value: Int) = TypedValue.applyDimension(
@@ -350,7 +470,12 @@ class CheckboxService : AccessibilityService() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragged) {
-                        if (SystemClock.uptimeMillis() - downAt > 500L) toggleAuto() else tickAll(fromAuto = false)
+                        if (SystemClock.uptimeMillis() - downAt > 500L) {
+                            saveReport()
+                            toast("Scan report saved - open the app to read it")
+                        } else {
+                            tickAll(fromAuto = false)
+                        }
                     }
                     true
                 }
@@ -384,13 +509,6 @@ class CheckboxService : AccessibilityService() {
             autoMode -> "AUTO ☑"
             else -> "TICK ☑"
         }
-    }
-
-    private fun toggleAuto() {
-        autoMode = !autoMode
-        prefs().edit().putBoolean("auto", autoMode).apply()
-        updateBubble()
-        toast(if (autoMode) "Auto ticking on" else "Auto ticking off")
     }
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()

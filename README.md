@@ -28,8 +28,8 @@ whatever app you install it from.
 3. Either tap the floating **TICK** button while the other app is open, or use
    *3. Tick in 5 seconds* and switch to the other app during the countdown.
 
-Hold the floating button to turn **auto** mode on or off — in auto mode the service
-ticks whatever appears each time the screen changes.
+Auto mode (in the settings screen) ticks whatever appears each time the screen changes.
+Holding the floating button saves a **scan report** instead — see below.
 
 ## Settings
 
@@ -61,6 +61,23 @@ is still treated as one when
 Because a web node can accept a click and ignore it, every tick on a control that reports
 its state is verified afterwards: if the state did not change, the spot is tapped with a
 gesture instead.
+
+### When a screen still will not tick
+
+Hold the floating button on that screen, then open Checkbox Ticker and press
+**Show last scan report**. It lists every window, how many nodes each one publishes, how
+many are checkable, how many sit inside a WebView, and a sample of the likely controls —
+which says plainly whether the content is reachable at all. Share it from that dialog.
+
+Three shapes of answer:
+
+* *nodes in the hundreds, checkable=0, webviews=1* — the page is exposed but its boxes are
+  custom-drawn. The loose matching should catch them; if it does not, the sample lines say
+  what they actually look like.
+* *no root, or nodes=1* — the app publishes nothing for that window. No node-tree approach
+  can work; it needs pixel matching.
+* *the window is not listed at all* — the content is in a window the service was not
+  reading. Every window is now scanned, not just the focused one, which is the fix for this.
 
 Still out of reach: a UI painted on a canvas (Flutter web's default renderer, WebGL, Unity),
 which publishes no nodes at all. That needs screen capture and pixel matching rather than
