@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.graphics.Rect
@@ -49,9 +48,6 @@ class ScreenService : Service() {
     private var reader: ImageReader? = null
     private var screenW = 0
     private var screenH = 0
-
-    @Volatile
-    private var lastFrame: Frame? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -180,7 +176,7 @@ class ScreenService : Service() {
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
                     BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
-                        ?.let { toScreen(it, frame) }
+                        ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "colour scan failed", t)
@@ -228,70 +224,9 @@ class ScreenService : Service() {
                     i += pixelStride
                 }
             }
-            val frame = Frame(rgb, w, h)
-            lastFrame = frame
-            return frame
+            return Frame(rgb, w, h)
         } finally {
             image.close()
-        }
-    }
-
-    /**
-     * Reads the words inside [region] (screen coordinates) out of the picture the last scan
-     * already took, so no second grab is needed and the pop-up cannot get in the way.
-     */
-    fun readText(region: Rect, done: (String?) -> Unit) {
-        val frame = lastFrame
-        if (frame == null) {
-            done(null)
-            return
-        }
-        worker.post {
-            val bitmap = crop(frame, region)
-            main.post {
-                if (bitmap == null) done(null) else Ocr.read(bitmap, done)
-            }
-        }
-    }
-
-    /**
-     * The picture is a scaled copy of the screen, and the two do not divide evenly on every
-     * phone, so places are converted by the real ratio between them rather than by [SCALE].
-     * Getting this wrong puts every tap slightly off the thing it was aiming at.
-     */
-    private fun toScreen(r: Rect, frame: Frame): Rect {
-        val sx = if (frame.w > 0) screenW.toFloat() / frame.w else SCALE.toFloat()
-        val sy = if (frame.h > 0) screenH.toFloat() / frame.h else SCALE.toFloat()
-        return Rect(
-            (r.left * sx).toInt(), (r.top * sy).toInt(),
-            (r.right * sx).toInt(), (r.bottom * sy).toInt()
-        )
-    }
-
-    private fun crop(frame: Frame, region: Rect): Bitmap? {
-        val sx = if (screenW > 0) frame.w.toFloat() / screenW else 1f / SCALE
-        val sy = if (screenH > 0) frame.h.toFloat() / screenH else 1f / SCALE
-        val left = (region.left * sx).toInt().coerceIn(0, frame.w - 1)
-        val top = (region.top * sy).toInt().coerceIn(0, frame.h - 1)
-        val right = (region.right * sx).toInt().coerceIn(left + 1, frame.w)
-        val bottom = (region.bottom * sy).toInt().coerceIn(top + 1, frame.h)
-        val w = right - left
-        val h = bottom - top
-        if (w < 8 || h < 8) return null
-
-        val pixels = IntArray(w * h)
-        for (y in 0 until h) {
-            val from = (top + y) * frame.w + left
-            val to = y * w
-            for (x in 0 until w) {
-                pixels[to + x] = frame.rgb[from + x] or (0xFF shl 24)
-            }
-        }
-        return try {
-            Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
-        } catch (t: Throwable) {
-            Log.e(TAG, "crop failed", t)
-            null
         }
     }
 
@@ -305,6 +240,8 @@ class ScreenService : Service() {
             val b = c and 0xff
             lum[k] = (r * 299 + g * 587 + b * 114) / 1000
         }
-        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map { toScreen(it, frame) }
+        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map {
+            Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
+        }
     }
 }

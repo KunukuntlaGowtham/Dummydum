@@ -26,9 +26,6 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.TextView
 import android.widget.Toast
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -43,8 +40,6 @@ class CheckboxService : AccessibilityService() {
     companion object {
         const val PREFS = "cfg"
         const val REPORT_FILE = "scan_report.txt"
-        const val NOTES_FILE = "notes.txt"
-        const val MISSED_FILE = "missed.txt"
         const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
         @Volatile
         var instance: CheckboxService? = null
@@ -58,15 +53,7 @@ class CheckboxService : AccessibilityService() {
     private var running = false
     private var looping = false
     private var ticked = 0
-    private var notes = 0
     private var lastBox: Rect? = null
-    private var panel: TextView? = null
-    private val missed = ArrayList<String>()
-    private val tried = ArrayList<Rect>()
-    private var currentBox: Rect? = null
-    private var currentNode: AccessibilityNodeInfo? = null
-    private var currentBefore: Boolean? = null
-    private var currentLabel: String? = null
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -83,7 +70,6 @@ class CheckboxService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         looping = false
-        hidePanel()
         hideBubble()
         instance = null
         return super.onUnbind(intent)
@@ -175,40 +161,9 @@ class CheckboxService : AccessibilityService() {
         silentRun = false
         ticked = 0
         lastBox = null
-        tried.clear()
-        missed.clear()
-        hidePanel()
         updateBubble()
-        if (prefs().getBoolean("practice", false)) {
-            practiceRun()
-            return
-        }
         toast("Running - press STOP to finish")
         step()
-    }
-
-    /**
-     * Rings everything the screen scan takes for a checkbox and taps nothing, so what the app
-     * is aiming at can be seen. The red cross is exactly where a tap would land.
-     */
-    private fun practiceRun() {
-        val screen = ScreenService.instance
-        if (screen == null) {
-            stopLoop("Practice needs screen reading")
-            return
-        }
-        screen.findBoxes(dp(14), dp(48)) { boxes ->
-            val found = boxes.filter { !hitsBubble(it) }
-            looping = false
-            running = false
-            updateBubble()
-            if (found.isEmpty()) {
-                toast("Practice: nothing here looks like an empty box")
-            } else {
-                showMarkers(found, 4000L)
-                toast("Practice: ${found.size} ringed, nothing tapped")
-            }
-        }
     }
 
     fun stopLoop(why: String) {
@@ -225,114 +180,14 @@ class CheckboxService : AccessibilityService() {
         tickOne { didTick ->
             if (!looping) return@tickOne
             val p = prefs()
-            if (didTick) afterTick { if (looping) checkItTook(p) } else scrollOn(p)
-        }
-    }
-
-    /**
-     * Every box gets one try. This looks at what that try achieved, writes the box down if
-     * it did not take, and moves on either way - nothing is ever tried twice.
-     */
-    private fun checkItTook(p: SharedPreferences) {
-        if (!p.getBoolean("checkResult", true)) {
-            scrollOn(p)
-            return
-        }
-
-        val node = currentNode
-        val before = currentBefore
-        if (node != null && before != null) {
-            if (!stateChanged(node, before)) recordMiss(currentLabel)
-            scrollOn(p)
-            return
-        }
-
-        val box = currentBox
-        val screen = ScreenService.instance
-        if (box == null || screen == null) {
-            scrollOn(p)
-            return
-        }
-
-        // Still an empty box where one was just tapped means the tap did not take.
-        screen.findBoxes(dp(14), dp(48)) { boxes ->
-            if (boxes.any { Rect.intersects(it, box) }) recordMiss(currentLabel)
-            scrollOn(p)
+            if (didTick) afterTick { if (looping) scrollOn(p) } else scrollOn(p)
         }
     }
 
     private fun scrollOn(p: SharedPreferences) {
         scrollScreen(p.getInt("scrollMm", 20))
         lastBox = null          // after a scroll the same spot holds a different box
-        tried.clear()
         main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
-    }
-
-    // ---------------------------------------------------------------- the missed list
-
-    private fun recordMiss(label: String?) {
-        val clean = label?.trim()?.replace('\n', ' ')?.take(70)
-        val text = if (clean.isNullOrEmpty()) "no label read" else clean
-        missed.add(text)
-        try {
-            openFileOutput(MISSED_FILE, Context.MODE_APPEND).use {
-                it.write("${missed.size}. $text\n".toByteArray())
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("CheckboxTicker", "could not write the miss", e)
-        }
-        updatePanel()
-    }
-
-    /** A see-through list of what was missed, kept on screen while the run goes on. */
-    private fun updatePanel() {
-        if (!prefs().getBoolean("showMissed", true) || missed.isEmpty()) return
-        val view = ensurePanel() ?: return
-        val recent = missed.takeLast(6).joinToString("\n") { "- $it" }
-        view.text = "Missed ${missed.size}\n$recent"
-    }
-
-    private fun ensurePanel(): TextView? {
-        panel?.let { return it }
-        val manager = windowManager ?: return null
-
-        val view = TextView(this)
-        view.setTextColor(Color.WHITE)
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        view.setPadding(dp(10), dp(8), dp(10), dp(8))
-        view.background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(10).toFloat()
-            setColor(Color.argb(130, 0, 0, 0))      // see-through, so the app stays readable
-        }
-
-        val params = WindowManager.LayoutParams(
-            dp(230),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        )
-        params.gravity = Gravity.BOTTOM or Gravity.START
-        params.x = dp(12)
-        params.y = dp(80)
-
-        return try {
-            manager.addView(view, params)
-            panel = view
-            view
-        } catch (e: Exception) {
-            android.util.Log.e("CheckboxTicker", "missed list failed", e)
-            null
-        }
-    }
-
-    private fun hidePanel() {
-        val view = panel ?: return
-        try { windowManager?.removeView(view) } catch (e: Exception) { }
-        panel = null
     }
 
     /** Ticks a single box - from the tree when it is published, by sight when it is not. */
@@ -353,22 +208,7 @@ class CheckboxService : AccessibilityService() {
 
         if (targets.isNotEmpty()) {
             val node = targets[0]
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
-
-            val label = if (wantLabel(p)) {
-                textBelow(bounds) ?: (node.text ?: node.contentDescription)?.toString()
-            } else {
-                null
-            }
-            if (p.getBoolean("notes", true)) note(label)
-
             val before = if (node.isCheckable) node.isChecked else null
-            currentBox = null
-            currentNode = node
-            currentBefore = before
-            currentLabel = label
-
             var ok = clickNode(node)
             if (!ok) ok = gestureTap(node)
             if (ok) ticked++
@@ -386,44 +226,18 @@ class CheckboxService : AccessibilityService() {
         }
 
         screen.findBoxes(dp(14), dp(48)) { boxes ->
-            // A box already tried on this screen is never tried again: one go each.
-            val box = boxes.firstOrNull { found ->
-                !hitsBubble(found) && tried.none { Rect.intersects(it, found) }
-            }
+            val box = boxes.firstOrNull { it != lastBox && !hitsBubble(it) }
             if (box == null) {
                 done(false)
-                return@findBoxes
-            }
-
-            showMarkers(listOf(box))
-            currentBox = box
-            currentNode = null
-            currentBefore = null
-
-            val tap: (String?) -> Unit = { label ->
-                currentLabel = label
-                if (p.getBoolean("notes", true)) note(label)
-                val ok = tapIn(box, p)
+            } else {
+                showMarkers(listOf(box))
+                val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
                 if (ok) ticked++
                 lastBox = box
-                tried.add(box)
                 main.postDelayed({ done(ok) }, waitMs(p, "tickWaitMs", 300))
-            }
-
-            if (!wantLabel(p)) {
-                tap(null)
-            } else {
-                // Read the label before tapping - afterwards the pop-up covers it.
-                val published = textBelow(box)
-                if (published != null) tap(published)
-                else screen.readText(labelBand(box)) { read -> tap(read) }
             }
         }
     }
-
-    /** The label is needed for the notes, and to say which box was missed. */
-    private fun wantLabel(p: SharedPreferences) =
-        p.getBoolean("notes", true) || p.getBoolean("checkResult", true)
 
     /** A short, controlled swipe up, so the page moves on by about [mm] millimetres. */
     private fun scrollScreen(mm: Int) {
@@ -445,22 +259,12 @@ class CheckboxService : AccessibilityService() {
         }
     }
 
-    private fun offsetX(p: SharedPreferences) = p.getInt("offsetX", 0).coerceIn(-400, 400)
-
-    private fun offsetY(p: SharedPreferences) = p.getInt("offsetY", 0).coerceIn(-400, 400)
-
-    /** Where a tap for [box] actually goes: its middle, nudged by the saved offset. */
-    private fun tapIn(box: Rect, p: SharedPreferences): Boolean =
-        gestureTap(box.exactCenterX() + offsetX(p), box.exactCenterY() + offsetY(p))
-
     private fun waitMs(p: SharedPreferences, key: String, fallback: Int) =
         p.getInt(key, fallback).coerceIn(0, 10000).toLong().coerceAtLeast(50L)
 
-    /** Our own windows are on screen during a scan, so nothing under them is a checkbox. */
-    private fun hitsBubble(box: Rect): Boolean = covers(bubble, box) || covers(panel, box)
-
-    private fun covers(view: View?, box: Rect): Boolean {
-        if (view == null) return false
+    /** Our own button is on screen during a scan, so anything under it is not a checkbox. */
+    private fun hitsBubble(box: Rect): Boolean {
+        val view = bubble ?: return false
         val where = IntArray(2)
         view.getLocationOnScreen(where)
         val pad = dp(8)
@@ -600,10 +404,9 @@ class CheckboxService : AccessibilityService() {
     }
 
     /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
-    private fun showMarkers(boxes: List<Rect>, howLong: Long = 1200L) {
+    private fun showMarkers(boxes: List<Rect>) {
         val manager = windowManager ?: return
-        val p = prefs()
-        val view = MarkerView(this, boxes, offsetX(p).toFloat(), offsetY(p).toFloat())
+        val view = MarkerView(this, boxes)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -620,42 +423,19 @@ class CheckboxService : AccessibilityService() {
         }
         main.postDelayed({
             try { manager.removeView(view) } catch (e: Exception) { }
-        }, howLong)
+        }, 1200L)
     }
 
-    private class MarkerView(
-        ctx: Context,
-        private val boxes: List<Rect>,
-        private val offsetX: Float,
-        private val offsetY: Float
-    ) : View(ctx) {
-
-        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private class MarkerView(ctx: Context, private val boxes: List<Rect>) : View(ctx) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = 4f
             color = Color.argb(235, 0, 200, 90)
         }
-        private val cross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 3f
-            color = Color.argb(235, 255, 70, 70)
-        }
-        private val where = IntArray(2)
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            // The window may not start at the top left of the screen, so draw in screen places.
-            getLocationOnScreen(where)
-            canvas.save()
-            canvas.translate(-where[0].toFloat(), -where[1].toFloat())
-            for (box in boxes) {
-                canvas.drawRect(box, ring)
-                val x = box.exactCenterX() + offsetX
-                val y = box.exactCenterY() + offsetY
-                canvas.drawLine(x - 14f, y, x + 14f, y, cross)   // where the tap lands
-                canvas.drawLine(x, y - 14f, x, y + 14f, cross)
-            }
-            canvas.restore()
+            for (box in boxes) canvas.drawRect(box, paint)
         }
     }
 
@@ -835,62 +615,6 @@ class CheckboxService : AccessibilityService() {
     } catch (e: Exception) {
         android.util.Log.e("CheckboxTicker", "tap failed", e)
         false
-    }
-
-    // ---------------------------------------------------------------- notes
-
-    /** The strip of screen just under a box, where its label usually sits. */
-    private fun labelBand(box: Rect): Rect {
-        val wide = maxOf(box.width() * 6, dp(160))
-        val deep = maxOf(box.height() * 4, dp(64))
-        return Rect(box.centerX() - wide, box.bottom, box.centerX() + wide, box.bottom + deep)
-    }
-
-    /** The nearest published text under [box], when the app publishes its text at all. */
-    private fun textBelow(box: Rect): String? {
-        val band = labelBand(box)
-        var best: String? = null
-        var bestGap = Int.MAX_VALUE
-        for (root in roots()) {
-            collectText(root, band, box) { text, gap ->
-                if (gap < bestGap) {
-                    bestGap = gap
-                    best = text
-                }
-            }
-        }
-        return best
-    }
-
-    private fun collectText(
-        node: AccessibilityNodeInfo?,
-        band: Rect,
-        box: Rect,
-        found: (String, Int) -> Unit
-    ) {
-        if (node == null) return
-        val text = (node.text ?: node.contentDescription ?: "").toString().trim()
-        if (text.isNotEmpty()) {
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
-            if (Rect.intersects(band, bounds)) found(text, maxOf(0, bounds.top - box.bottom))
-        }
-        for (i in 0 until node.childCount) collectText(node.getChild(i), band, box, found)
-    }
-
-    /** Writes one line for the box about to be ticked. */
-    private fun note(text: String?) {
-        val line = text?.trim()?.replace('\n', ' ')?.take(160)
-        if (line.isNullOrEmpty()) return
-        notes++
-        val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-        try {
-            openFileOutput(NOTES_FILE, Context.MODE_APPEND).use {
-                it.write("$notes. [$stamp] $line\n".toByteArray())
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("CheckboxTicker", "could not write the note", e)
-        }
     }
 
     // ---------------------------------------------------------------- scan report

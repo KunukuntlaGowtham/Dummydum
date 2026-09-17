@@ -21,9 +21,3 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
-
-dependencies {
-    // On-device text recognition, model included - reads labels on screens that
-    // publish no text of their own. Nothing is uploaded.
-    implementation("com.google.mlkit:text-recognition:16.0.1")
-}

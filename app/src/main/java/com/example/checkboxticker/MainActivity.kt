@@ -36,12 +36,6 @@ class MainActivity : Activity() {
     private lateinit var auto: CheckBox
     private lateinit var pixels: CheckBox
     private lateinit var tapColour: CheckBox
-    private lateinit var notes: CheckBox
-    private lateinit var checkResult: CheckBox
-    private lateinit var showMissed: CheckBox
-    private lateinit var practice: CheckBox
-    private lateinit var offsetXInput: EditText
-    private lateinit var offsetYInput: EditText
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
     private lateinit var tickWaitInput: EditText
@@ -120,12 +114,6 @@ class MainActivity : Activity() {
                 "for, the biggest patch of this colour is tapped, and only then does the next " +
                 "box get ticked."))
 
-        notes = check("Note down the words under each box", p.getBoolean("notes", true))
-        root.addView(notes)
-        root.addView(note("The label under a box is read before it is ticked - from the app's " +
-                "own text when it publishes any, otherwise by reading the picture of the " +
-                "screen. Both happen on the phone."))
-
         root.addView(label("Colour of the pop-up button"))
         colourInput = EditText(this).apply {
             setText(String.format("#%06X", p.getInt("colour", CheckboxService.DEFAULT_COLOUR)))
@@ -140,33 +128,6 @@ class MainActivity : Activity() {
         root.addView(label("Ignore the top % of the screen"))
         skipTopInput = number(p.getInt("skipTopPct", 20))
         root.addView(skipTopInput)
-
-        root.addView(heading("When a box will not tick"))
-        checkResult = check("Try each box once, then note the ones that failed",
-            p.getBoolean("checkResult", true))
-        root.addView(checkResult)
-        showMissed = check("Show the missed list on screen", p.getBoolean("showMissed", true))
-        root.addView(showMissed)
-        root.addView(note("Each box gets one go. If it is still empty afterwards it is written " +
-                "down with its label and the run moves on - nothing is tried twice. The list " +
-                "builds up in a see-through panel at the bottom of the screen."))
-
-        root.addView(button("Show missed boxes") { showMissedList() })
-
-        root.addView(heading("Aim"))
-        practice = check("Practice run (ring the boxes, tap nothing)", p.getBoolean("practice", false))
-        root.addView(practice)
-        root.addView(note("With this on, START rings everything it takes for an empty box and " +
-                "taps nothing. The red cross marks exactly where a tap would land - if the " +
-                "cross sits off the checkbox, nudge it with the offsets below."))
-
-        root.addView(label("Nudge every tap sideways (px)"))
-        offsetXInput = signedNumber(p.getInt("offsetX", 0))
-        root.addView(offsetXInput)
-
-        root.addView(label("Nudge every tap up or down (px)"))
-        offsetYInput = signedNumber(p.getInt("offsetY", 0))
-        root.addView(offsetYInput)
 
         root.addView(heading("Speed"))
         root.addView(note("Milliseconds. 1000 is one second - lower is faster, but a screen " +
@@ -206,8 +167,6 @@ class MainActivity : Activity() {
         root.addView(note("With screen reading on, a screen that publishes nothing is still " +
                 "handled: the empty boxes are spotted by how they look and tapped. Nothing " +
                 "leaves the phone - a frame is measured and dropped."))
-
-        root.addView(button("Show the notes") { showNotes() })
 
         root.addView(button("Show last scan report") { showReport() })
 
@@ -250,12 +209,6 @@ class MainActivity : Activity() {
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .putBoolean("tapColour", tapColour.isChecked)
-            .putBoolean("notes", notes.isChecked)
-            .putBoolean("checkResult", checkResult.isChecked)
-            .putBoolean("showMissed", showMissed.isChecked)
-            .putBoolean("practice", practice.isChecked)
-            .putInt("offsetX", signed(offsetXInput.text.toString()))
-            .putInt("offsetY", signed(offsetYInput.text.toString()))
             .putInt("colour", parseColour(colourInput.text.toString()))
             .putInt("colourTol", tolInput.text.toString().toIntOrNull()?.coerceIn(0, 200) ?: 60)
             .putInt("tickWaitMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
@@ -282,51 +235,6 @@ class MainActivity : Activity() {
                 .putExtra("data", data)
         )
         toast("Screen reading is on")
-    }
-
-    /** Shows the labels written down as boxes were ticked. */
-    private fun signed(text: String) = text.trim().toIntOrNull()?.coerceIn(-400, 400) ?: 0
-
-    /** The boxes that would not tick, in the order they were given up on. */
-    private fun showMissedList() =
-        showFile(CheckboxService.MISSED_FILE, "Missed boxes", "Nothing missed yet")
-
-    private fun showNotes() = showFile(CheckboxService.NOTES_FILE, "Notes", "Nothing noted down yet")
-
-    private fun showFile(name: String, title: String, whenEmpty: String) {
-        val text = try {
-            openFileInput(name).bufferedReader().use { it.readText() }
-        } catch (e: Exception) {
-            ""
-        }
-        if (text.isBlank()) {
-            toast(whenEmpty)
-            return
-        }
-
-        val body = TextView(this).apply {
-            this.text = text
-            setTextIsSelectable(true)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-        }
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(ScrollView(this).apply { addView(body) })
-            .setPositiveButton("Share") { _, _ ->
-                val send = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_SUBJECT, "Checkbox Ticker - $title")
-                    putExtra(Intent.EXTRA_TEXT, text)
-                }
-                startActivity(Intent.createChooser(send, "Send"))
-            }
-            .setNeutralButton("Clear") { _, _ ->
-                deleteFile(name)
-                toast("Cleared")
-            }
-            .setNegativeButton("Close", null)
-            .show()
     }
 
     /** Shows what the service could see the last time a screen was scanned. */
@@ -401,13 +309,6 @@ class MainActivity : Activity() {
     private fun check(text: String, checked: Boolean) = CheckBox(this).apply {
         this.text = text
         isChecked = checked
-    }
-
-    /** Like [number], but minus is allowed - an offset can go either way. */
-    private fun signedNumber(value: Int) = EditText(this).apply {
-        inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
-        setText(value.toString())
-        layoutParams = LinearLayout.LayoutParams(dp(120), ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
     private fun number(value: Int) = EditText(this).apply {
