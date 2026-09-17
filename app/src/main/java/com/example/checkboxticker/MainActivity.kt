@@ -35,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var bubble: CheckBox
     private lateinit var auto: CheckBox
     private lateinit var pixels: CheckBox
+    private lateinit var showStatus: CheckBox
     private lateinit var tapColour: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
@@ -168,6 +169,12 @@ class MainActivity : Activity() {
                 "handled: the empty boxes are spotted by how they look and tapped. Nothing " +
                 "leaves the phone - a frame is measured and dropped."))
 
+        showStatus = check("Show what the run is doing on screen", p.getBoolean("showStatus", true))
+        root.addView(showStatus)
+        root.addView(note("A see-through line at the bottom says which step the run is on - " +
+                "what it found, what it tapped, when it scrolled. That is what to read when a " +
+                "run does nothing."))
+
         root.addView(button("Show last scan report") { showReport() })
 
         root.addView(button("3. Start in 5 seconds (open your app now)") {
@@ -206,6 +213,7 @@ class MainActivity : Activity() {
             .putBoolean("bubble", bubble.isChecked)
             .putBoolean("auto", auto.isChecked)
             .putBoolean("pixels", pixels.isChecked)
+            .putBoolean("showStatus", showStatus.isChecked)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .putBoolean("tapColour", tapColour.isChecked)

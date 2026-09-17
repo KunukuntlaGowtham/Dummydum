@@ -54,6 +54,7 @@ class CheckboxService : AccessibilityService() {
     private var looping = false
     private var ticked = 0
     private var lastBox: Rect? = null
+    private var panel: TextView? = null
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -70,6 +71,7 @@ class CheckboxService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         looping = false
+        hidePanel()
         hideBubble()
         instance = null
         return super.onUnbind(intent)
@@ -163,6 +165,7 @@ class CheckboxService : AccessibilityService() {
         lastBox = null
         updateBubble()
         toast("Running - press STOP to finish")
+        status("Started")
         step()
     }
 
@@ -172,6 +175,7 @@ class CheckboxService : AccessibilityService() {
         running = false
         lastBox = null
         updateBubble()
+        status("$why - ticked $ticked")
         toast("$why after $ticked")
     }
 
@@ -185,6 +189,7 @@ class CheckboxService : AccessibilityService() {
     }
 
     private fun scrollOn(p: SharedPreferences) {
+        status("scrolling ${p.getInt("scrollMm", 20)} mm")
         scrollScreen(p.getInt("scrollMm", 20))
         lastBox = null          // after a scroll the same spot holds a different box
         main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
@@ -208,6 +213,7 @@ class CheckboxService : AccessibilityService() {
 
         if (targets.isNotEmpty()) {
             val node = targets[0]
+            status("tree: clicking ${(node.className ?: "a node").toString().substringAfterLast('.')}")
             val before = if (node.isCheckable) node.isChecked else null
             var ok = clickNode(node)
             if (!ok) ok = gestureTap(node)
@@ -221,6 +227,7 @@ class CheckboxService : AccessibilityService() {
 
         val screen = ScreenService.instance
         if (!p.getBoolean("pixels", true) || screen == null) {
+            status("nothing in the tree, and screen reading is off")
             done(false)
             return
         }
@@ -228,10 +235,13 @@ class CheckboxService : AccessibilityService() {
         screen.findBoxes(dp(14), dp(48)) { boxes ->
             val box = boxes.firstOrNull { it != lastBox && !hitsBubble(it) }
             if (box == null) {
+                status("screen: no empty box to tap (${boxes.size} seen)")
                 done(false)
             } else {
                 showMarkers(listOf(box))
                 val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+                status("screen: ${boxes.size} found, tapped ${box.centerX()},${box.centerY()}" +
+                        (if (ok) "" else " - tap refused"))
                 if (ok) ticked++
                 lastBox = box
                 main.postDelayed({ done(ok) }, waitMs(p, "tickWaitMs", 300))
@@ -262,9 +272,68 @@ class CheckboxService : AccessibilityService() {
     private fun waitMs(p: SharedPreferences, key: String, fallback: Int) =
         p.getInt(key, fallback).coerceIn(0, 10000).toLong().coerceAtLeast(50L)
 
-    /** Our own button is on screen during a scan, so anything under it is not a checkbox. */
-    private fun hitsBubble(box: Rect): Boolean {
-        val view = bubble ?: return false
+    /**
+     * A see-through line at the bottom of the screen saying what the run is doing, so a run
+     * that achieves nothing says which step it got stuck on.
+     */
+    private fun status(text: String) {
+        android.util.Log.i("CheckboxTicker", text)
+        if (!prefs().getBoolean("showStatus", true)) {
+            hidePanel()
+            return
+        }
+        val view = ensurePanel() ?: return
+        view.text = text
+    }
+
+    private fun ensurePanel(): TextView? {
+        panel?.let { return it }
+        val manager = windowManager ?: return null
+
+        val view = TextView(this)
+        view.setTextColor(Color.WHITE)
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        view.setPadding(dp(10), dp(6), dp(10), dp(6))
+        view.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(10).toFloat()
+            setColor(Color.argb(130, 0, 0, 0))
+        }
+
+        val params = WindowManager.LayoutParams(
+            dp(250),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.BOTTOM or Gravity.START
+        params.x = dp(12)
+        params.y = dp(80)
+
+        return try {
+            manager.addView(view, params)
+            panel = view
+            view
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "status line failed", e)
+            null
+        }
+    }
+
+    private fun hidePanel() {
+        val view = panel ?: return
+        try { windowManager?.removeView(view) } catch (e: Exception) { }
+        panel = null
+    }
+
+    /** Our own windows are on screen during a scan, so nothing under them is a checkbox. */
+    private fun hitsBubble(box: Rect): Boolean = covers(bubble, box) || covers(panel, box)
+
+    private fun covers(candidate: View?, box: Rect): Boolean {
+        val view = candidate ?: return false
         val where = IntArray(2)
         view.getLocationOnScreen(where)
         val pad = dp(8)
@@ -394,10 +463,12 @@ class CheckboxService : AccessibilityService() {
         // The pop-up has already had the after-a-tick wait to appear.
         screen.findColour(colour, tolerance, skipTop) { box ->
             if (box == null) {
+                status("pop-up: no ${String.format("#%06X", colour)} below the top $skipTop%")
                 next()
             } else {
                 showMarkers(listOf(box))
                 gestureTap(box.exactCenterX(), box.exactCenterY())
+                status("pop-up: tapped ${box.centerX()},${box.centerY()}")
                 main.postDelayed({ next() }, waitMs(p, "clearWaitMs", 300))
             }
         }
@@ -405,6 +476,9 @@ class CheckboxService : AccessibilityService() {
 
     /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
     private fun showMarkers(boxes: List<Rect>) {
+        // A ring is a square outline with a flat middle, which is exactly what the scanner
+        // looks for, so during a run it would photograph its own markers and tap those.
+        if (looping) return
         val manager = windowManager ?: return
         val view = MarkerView(this, boxes)
         val params = WindowManager.LayoutParams(

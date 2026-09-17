@@ -6,7 +6,7 @@
 
     <application
         android:label="@string/app_name"
-        android:icon="@android:drawable/checkbox_on_background"
+        android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light">
 
         <activity android:name=".MainActivity" android:exported="true">
