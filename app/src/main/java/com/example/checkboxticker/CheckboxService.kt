@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -102,14 +103,17 @@ class CheckboxService : AccessibilityService() {
         }
 
         val p = prefs()
-        val onlyUnchecked = p.getBoolean("onlyUnchecked", true)
-        val switches = p.getBoolean("switches", true)
-        val radios = p.getBoolean("radios", false)
+        val rules = Rules(
+            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
+            switches = p.getBoolean("switches", true),
+            radios = p.getBoolean("radios", false),
+            loose = p.getBoolean("loose", true)
+        )
         val gap = p.getInt("gapMs", 250).coerceIn(0, 5000)
         val max = p.getInt("maxTicks", 50).coerceIn(1, 500)
 
         val targets = ArrayList<AccessibilityNodeInfo>()
-        collect(root, targets, onlyUnchecked, switches, radios, max)
+        collect(root, targets, rules, max)
 
         if (targets.isEmpty()) {
             if (!fromAuto) toast("No checkbox found on this screen")
@@ -122,39 +126,94 @@ class CheckboxService : AccessibilityService() {
         tickNext(targets, 0, gap, 0)
     }
 
+    private data class Rules(
+        val onlyUnchecked: Boolean,
+        val switches: Boolean,
+        val radios: Boolean,
+        val loose: Boolean
+    )
+
     private fun collect(
         node: AccessibilityNodeInfo?,
         out: MutableList<AccessibilityNodeInfo>,
-        onlyUnchecked: Boolean,
-        switches: Boolean,
-        radios: Boolean,
+        rules: Rules,
         max: Int
     ) {
         if (node == null || out.size >= max) return
-        if (isTarget(node, onlyUnchecked, switches, radios)) {
+        if (isTarget(node, rules)) {
             out.add(node)
             return  // a checkable row and its checkbox are the same tick, so stop here
         }
         for (i in 0 until node.childCount) {
-            collect(node.getChild(i), out, onlyUnchecked, switches, radios, max)
+            collect(node.getChild(i), out, rules, max)
         }
     }
 
-    private fun isTarget(
-        node: AccessibilityNodeInfo,
-        onlyUnchecked: Boolean,
-        switches: Boolean,
-        radios: Boolean
-    ): Boolean {
-        if (!node.isCheckable || !node.isEnabled || !node.isVisibleToUser) return false
-        if (onlyUnchecked && node.isChecked) return false
-        val cls = (node.className ?: "").toString()
-        if (!radios && cls.endsWith("RadioButton")) return false
-        if (!switches && (cls.endsWith("Switch") || cls.endsWith("SwitchCompat") ||
-                    cls.endsWith("SwitchMaterial") || cls.endsWith("ToggleButton"))) return false
+    private fun isTarget(node: AccessibilityNodeInfo, rules: Rules): Boolean {
+        if (!node.isEnabled || !node.isVisibleToUser) return false
+
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
-        return bounds.width() > 0 && bounds.height() > 0
+        if (bounds.width() <= 0 || bounds.height() <= 0) return false
+
+        val cls = (node.className ?: "").toString()
+        if (!rules.radios && cls.endsWith("RadioButton")) return false
+        if (!rules.switches && (cls.endsWith("Switch") || cls.endsWith("SwitchCompat") ||
+                    cls.endsWith("SwitchMaterial") || cls.endsWith("ToggleButton"))) return false
+
+        val declared = node.isCheckable || cls.endsWith("CheckBox") || cls.endsWith("CheckedTextView")
+        val guessed = rules.loose && !declared && node.isClickable && looksLikeCheckbox(node, bounds)
+        if (!declared && !guessed) return false
+
+        return !(rules.onlyUnchecked && looksChecked(node))
+    }
+
+    /**
+     * For a control that never says it is checkable - a styled div in a web page, a custom
+     * view - guess from its name, or from its shape when it sits inside a WebView.
+     */
+    private fun looksLikeCheckbox(node: AccessibilityNodeInfo, bounds: Rect): Boolean {
+        val id = (node.viewIdResourceName ?: "").lowercase()
+        if (id.contains("checkbox") || id.contains("check_box") || id.contains("tickbox")) return true
+
+        val words = words(node)
+        if (words.contains("checkbox") || words.contains("check box") || words.contains("tick box")) return true
+
+        // A small empty square you can tap inside a web page is nearly always a checkbox.
+        if (!isInWebView(node)) return false
+        if (node.childCount > 0 || !node.text.isNullOrEmpty()) return false
+        val w = bounds.width()
+        val h = bounds.height()
+        val square = abs(w - h) <= maxOf(w, h) / 4
+        return square && maxOf(w, h) <= dp(56) && minOf(w, h) >= dp(12)
+    }
+
+    private fun isInWebView(node: AccessibilityNodeInfo): Boolean {
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < 12) {
+            if ((parent.className ?: "").contains("WebView")) return true
+            parent = parent.parent
+            depth++
+        }
+        return false
+    }
+
+    /** Best guess at whether a control is already ticked, for controls that do not report it. */
+    private fun looksChecked(node: AccessibilityNodeInfo): Boolean {
+        if (node.isCheckable) return node.isChecked
+        val words = words(node)
+        if (words.contains("unchecked") || words.contains("not checked") ||
+            words.contains("unticked") || words.contains("not selected")) return false
+        if (node.isChecked || node.isSelected) return true
+        return words.contains("checked") || words.contains("ticked") || words.contains("selected")
+    }
+
+    private fun words(node: AccessibilityNodeInfo): String {
+        val text = node.text ?: ""
+        val desc = node.contentDescription ?: ""
+        val state = if (Build.VERSION.SDK_INT >= 30) node.stateDescription ?: "" else ""
+        return "$text $desc $state".lowercase()
     }
 
     private fun tickNext(targets: List<AccessibilityNodeInfo>, i: Int, gap: Int, done: Int) {
@@ -167,16 +226,31 @@ class CheckboxService : AccessibilityService() {
             }
             return
         }
-        val ok = tap(targets[i])
-        main.postDelayed(
-            { tickNext(targets, i + 1, gap, done + if (ok) 1 else 0) },
-            gap.toLong().coerceAtLeast(60L)
-        )
+
+        val node = targets[i]
+        val before = if (node.isCheckable) node.isChecked else null
+        var ok = clickNode(node)
+        if (!ok) ok = gestureTap(node)
+
+        main.postDelayed({
+            var worked = ok
+            // A web page can swallow the click, so make sure the box really changed.
+            if (ok && before != null && !stateChanged(node, before)) worked = gestureTap(node)
+            tickNext(targets, i + 1, gap, done + if (worked) 1 else 0)
+        }, gap.toLong().coerceAtLeast(60L))
     }
 
-    /** Clicks the node itself, else a clickable parent, else taps its middle. */
-    private fun tap(node: AccessibilityNodeInfo): Boolean {
-        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+    private fun stateChanged(node: AccessibilityNodeInfo, before: Boolean): Boolean = try {
+        node.refresh()
+        node.isChecked != before
+    } catch (e: Exception) {
+        true
+    }
+
+    /** Clicks the node itself, or the nearest clickable parent. */
+    private fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        if ((node.isClickable || node.isCheckable) &&
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
 
         var parent = node.parent
         var depth = 0
@@ -185,7 +259,11 @@ class CheckboxService : AccessibilityService() {
             parent = parent.parent
             depth++
         }
+        return false
+    }
 
+    /** Taps the middle of a node on screen - works even when nothing is clickable. */
+    private fun gestureTap(node: AccessibilityNodeInfo): Boolean {
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         if (bounds.width() <= 0 || bounds.height() <= 0) return false

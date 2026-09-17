@@ -27,6 +27,7 @@ class MainActivity : Activity() {
     private lateinit var onlyUnchecked: CheckBox
     private lateinit var switches: CheckBox
     private lateinit var radios: CheckBox
+    private lateinit var loose: CheckBox
     private lateinit var bubble: CheckBox
     private lateinit var auto: CheckBox
     private lateinit var gapInput: EditText
@@ -65,9 +66,14 @@ class MainActivity : Activity() {
         onlyUnchecked = check("Only boxes that are empty", p.getBoolean("onlyUnchecked", true))
         switches = check("Also flip switches and toggles", p.getBoolean("switches", true))
         radios = check("Also tick radio buttons", p.getBoolean("radios", false))
+        loose = check("Also web page and custom boxes", p.getBoolean("loose", true))
         root.addView(onlyUnchecked)
         root.addView(switches)
         root.addView(radios)
+        root.addView(loose)
+        root.addView(note("Web pages and custom views often do not say they are checkboxes. " +
+                "With this on they are spotted by their name, or by being a small empty " +
+                "square inside a web page. Turn it off if it taps the wrong thing."))
 
         root.addView(heading("How it runs"))
         bubble = check("Show the floating TICK button", p.getBoolean("bubble", true))
@@ -115,6 +121,7 @@ class MainActivity : Activity() {
             .putBoolean("onlyUnchecked", onlyUnchecked.isChecked)
             .putBoolean("switches", switches.isChecked)
             .putBoolean("radios", radios.isChecked)
+            .putBoolean("loose", loose.isChecked)
             .putBoolean("bubble", bubble.isChecked)
             .putBoolean("auto", auto.isChecked)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)

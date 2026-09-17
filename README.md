@@ -38,10 +38,33 @@ ticks whatever appears each time the screen changes.
 | Only boxes that are empty | Skips boxes that are already ticked, so a run never unticks anything. |
 | Also flip switches and toggles | Includes `Switch`, `SwitchCompat` and `ToggleButton` controls. |
 | Also tick radio buttons | Includes `RadioButton` controls (off by default — they usually cancel each other out). |
+| Also web page and custom boxes | Catches controls that never report themselves as checkable (see below). |
 | Show the floating TICK button | Draws the draggable bubble. It is an accessibility overlay, so no "draw over other apps" permission is needed. |
 | Auto-tick whenever the screen changes | Runs by itself on each new screen, with a 1.5 s cooldown between runs. |
 | Gap between taps | Milliseconds between one tick and the next (minimum 60 ms). |
 | Most boxes in one run | Upper bound on how many boxes a single run touches. |
+
+## Web pages inside an app
+
+A WebView is not a black box: while an accessibility service is running, Chromium mirrors
+the DOM into virtual nodes, so an `<input type="checkbox">` arrives as
+`android.widget.CheckBox` with a working `ACTION_CLICK`, and so does anything carrying
+`role="checkbox"`. Those are ticked the same way as native ones.
+
+What that misses is a checkbox built from a styled `<div>` with no ARIA role. With
+**Also web page and custom boxes** on, a control that never reports itself as checkable
+is still treated as one when
+
+* its view id, text or description mentions a checkbox, or
+* it is a small empty square, tappable, and sits inside a WebView.
+
+Because a web node can accept a click and ignore it, every tick on a control that reports
+its state is verified afterwards: if the state did not change, the spot is tapped with a
+gesture instead.
+
+Still out of reach: a UI painted on a canvas (Flutter web's default renderer, WebGL, Unity),
+which publishes no nodes at all. That needs screen capture and pixel matching rather than
+the node tree.
 
 ## Building locally
 
