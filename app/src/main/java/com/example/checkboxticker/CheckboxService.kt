@@ -44,6 +44,8 @@ class CheckboxService : AccessibilityService() {
         const val PREFS = "cfg"
         const val REPORT_FILE = "scan_report.txt"
         const val NOTES_FILE = "notes.txt"
+        const val POLL_MS = 60L                    // how often a fast run looks again
+        const val SETTLE_MS = 2000L                // longest wait for the screen to stop moving
         const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
         @Volatile
         var instance: CheckboxService? = null
@@ -58,6 +60,7 @@ class CheckboxService : AccessibilityService() {
     private var looping = false
     private var ticked = 0
     private var notes = 0
+    private var stuckScrolls = 0
     private var lastBox: Rect? = null
     private var autoMode = false
     private var silentRun = false
@@ -165,6 +168,7 @@ class CheckboxService : AccessibilityService() {
         running = true
         silentRun = false
         ticked = 0
+        stuckScrolls = 0
         lastBox = null
         updateBubble()
         toast("Running - press STOP to finish")
@@ -185,14 +189,127 @@ class CheckboxService : AccessibilityService() {
         tickOne { didTick ->
             if (!looping) return@tickOne
             val p = prefs()
-            if (didTick) afterTick { if (looping) scrollOn(p) } else scrollOn(p)
+            if (didTick) clearPopup(p) { if (looping) scrollOn(p) } else scrollOn(p)
         }
     }
 
+    private fun fullSpeed(p: SharedPreferences) =
+        p.getBoolean("fast", true) && ScreenService.instance != null
+
+    private fun giveUp(p: SharedPreferences) =
+        p.getInt("giveUpMs", 2500).coerceIn(200, 20000).toLong()
+
+    /**
+     * Runs [attempt] over and over until it reports success or [timeoutMs] runs out. This is
+     * what replaces waiting a fixed time: the run carries on the moment the screen is ready,
+     * however fast or slow the phone and the app happen to be.
+     */
+    private fun pollFor(
+        timeoutMs: Long,
+        attempt: (report: (Boolean) -> Unit) -> Unit,
+        finished: (Boolean) -> Unit
+    ) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        fun round() {
+            if (!looping) {
+                finished(false)
+                return
+            }
+            attempt { ok ->
+                when {
+                    ok -> finished(true)
+                    SystemClock.uptimeMillis() >= deadline -> finished(false)
+                    else -> main.postDelayed({ round() }, POLL_MS)
+                }
+            }
+        }
+        round()
+    }
+
+    /** Waits for the pop-up, taps it the instant it appears, and goes on once it is gone. */
+    private fun clearPopup(p: SharedPreferences, then: () -> Unit) {
+        val screen = ScreenService.instance
+        if (!p.getBoolean("tapColour", true) || screen == null) {
+            then()
+            return
+        }
+        if (!fullSpeed(p)) {
+            afterTick(then)
+            return
+        }
+
+        val colour = p.getInt("colour", DEFAULT_COLOUR)
+        val tolerance = p.getInt("colourTol", 60).coerceIn(0, 200)
+        val skipTop = p.getInt("skipTopPct", 20).coerceIn(0, 90)
+        val limit = giveUp(p)
+
+        pollFor(limit, { report ->
+            screen.findColour(colour, tolerance, skipTop) { box ->
+                if (box == null) {
+                    report(false)
+                } else {
+                    gestureTap(box.exactCenterX(), box.exactCenterY())
+                    report(true)
+                }
+            }
+        }) { tapped ->
+            if (!tapped) {
+                then()          // no pop-up this time
+            } else {
+                pollFor(limit, { report ->
+                    screen.findColour(colour, tolerance, skipTop) { box -> report(box == null) }
+                }) { then() }
+            }
+        }
+    }
+
+    /** Waits for the screen to stop moving: two identical fingerprints in a row. */
+    private fun settle(then: () -> Unit) {
+        val screen = ScreenService.instance ?: return then()
+        var previous = 0L
+        var first = true
+        pollFor(SETTLE_MS, { report ->
+            screen.signature { value ->
+                val same = !first && value == previous
+                previous = value
+                first = false
+                report(same)
+            }
+        }) { then() }
+    }
+
+    /**
+     * Scrolls on, and notices when the page will not move any further: a scroll that leaves
+     * the screen exactly as it was means the end of the list, so the run stops by itself.
+     */
     private fun scrollOn(p: SharedPreferences) {
-        scrollScreen(p.getInt("scrollMm", 20))
-        lastBox = null          // after a scroll the same spot holds a different box
-        main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
+        val screen = ScreenService.instance
+        val mm = p.getInt("scrollMm", 20)
+        if (screen == null) {
+            scrollScreen(mm)
+            lastBox = null      // after a scroll the same spot holds a different box
+            main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
+            return
+        }
+
+        screen.signature { before ->
+            if (!looping) return@signature
+            scrollScreen(mm)
+            lastBox = null
+
+            val carryOn = {
+                screen.signature { after ->
+                    if (looping) {
+                        if (after == before) stuckScrolls++ else stuckScrolls = 0
+                        if (stuckScrolls >= 2) stopLoop("Reached the end of the page")
+                        else step()
+                    }
+                }
+            }
+
+            if (fullSpeed(p)) settle { carryOn() }
+            else main.postDelayed({ carryOn() }, waitMs(p, "scrollWaitMs", 300))
+        }
     }
 
     /** Ticks a single box - from the tree when it is published, by sight when it is not. */
@@ -225,7 +342,7 @@ class CheckboxService : AccessibilityService() {
             main.postDelayed({
                 if (ok && before != null && !stateChanged(node, before)) gestureTap(node)
                 done(ok)
-            }, waitMs(p, "tickWaitMs", 300))
+            }, if (fullSpeed(p)) POLL_MS else waitMs(p, "tickWaitMs", 300))
             return
         }
 
@@ -247,7 +364,7 @@ class CheckboxService : AccessibilityService() {
                 val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
                 if (ok) ticked++
                 lastBox = box
-                main.postDelayed({ done(ok) }, waitMs(p, "tickWaitMs", 300))
+                main.postDelayed({ done(ok) }, if (fullSpeed(p)) POLL_MS else waitMs(p, "tickWaitMs", 300))
             }
 
             if (!p.getBoolean("notes", true)) {
@@ -434,6 +551,8 @@ class CheckboxService : AccessibilityService() {
 
     /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
     private fun showMarkers(boxes: List<Rect>) {
+        // The rings are drawn on screen, so a fast run would photograph its own markers.
+        if (looping && fullSpeed(prefs())) return
         val manager = windowManager ?: return
         val view = MarkerView(this, boxes)
         val params = WindowManager.LayoutParams(
