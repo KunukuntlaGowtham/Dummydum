@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var auto: CheckBox
     private lateinit var pixels: CheckBox
     private lateinit var tapColour: CheckBox
+    private lateinit var notes: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
     private lateinit var tickWaitInput: EditText
@@ -114,6 +115,12 @@ class MainActivity : Activity() {
                 "for, the biggest patch of this colour is tapped, and only then does the next " +
                 "box get ticked."))
 
+        notes = check("Note down the words under each box", p.getBoolean("notes", true))
+        root.addView(notes)
+        root.addView(note("The label under a box is read before it is ticked - from the app's " +
+                "own text when it publishes any, otherwise by reading the picture of the " +
+                "screen. Both happen on the phone."))
+
         root.addView(label("Colour of the pop-up button"))
         colourInput = EditText(this).apply {
             setText(String.format("#%06X", p.getInt("colour", CheckboxService.DEFAULT_COLOUR)))
@@ -168,6 +175,8 @@ class MainActivity : Activity() {
                 "handled: the empty boxes are spotted by how they look and tapped. Nothing " +
                 "leaves the phone - a frame is measured and dropped."))
 
+        root.addView(button("Show the notes") { showNotes() })
+
         root.addView(button("Show last scan report") { showReport() })
 
         root.addView(button("3. Start in 5 seconds (open your app now)") {
@@ -209,6 +218,7 @@ class MainActivity : Activity() {
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .putBoolean("tapColour", tapColour.isChecked)
+            .putBoolean("notes", notes.isChecked)
             .putInt("colour", parseColour(colourInput.text.toString()))
             .putInt("colourTol", tolInput.text.toString().toIntOrNull()?.coerceIn(0, 200) ?: 60)
             .putInt("tickWaitMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
@@ -235,6 +245,43 @@ class MainActivity : Activity() {
                 .putExtra("data", data)
         )
         toast("Screen reading is on")
+    }
+
+    /** Shows the labels written down as boxes were ticked. */
+    private fun showNotes() {
+        val text = try {
+            openFileInput(CheckboxService.NOTES_FILE).bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            ""
+        }
+        if (text.isBlank()) {
+            toast("Nothing noted down yet")
+            return
+        }
+
+        val body = TextView(this).apply {
+            this.text = text
+            setTextIsSelectable(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Notes")
+            .setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton("Share") { _, _ ->
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Checkbox Ticker notes")
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                startActivity(Intent.createChooser(send, "Send notes"))
+            }
+            .setNeutralButton("Clear") { _, _ ->
+                deleteFile(CheckboxService.NOTES_FILE)
+                toast("Notes cleared")
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     /** Shows what the service could see the last time a screen was scanned. */

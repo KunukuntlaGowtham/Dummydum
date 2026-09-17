@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Point
 import android.graphics.Rect
@@ -48,6 +49,9 @@ class ScreenService : Service() {
     private var reader: ImageReader? = null
     private var screenW = 0
     private var screenH = 0
+
+    @Volatile
+    private var lastFrame: Frame? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -224,9 +228,54 @@ class ScreenService : Service() {
                     i += pixelStride
                 }
             }
-            return Frame(rgb, w, h)
+            val frame = Frame(rgb, w, h)
+            lastFrame = frame
+            return frame
         } finally {
             image.close()
+        }
+    }
+
+    /**
+     * Reads the words inside [region] (screen coordinates) out of the picture the last scan
+     * already took, so no second grab is needed and the pop-up cannot get in the way.
+     */
+    fun readText(region: Rect, done: (String?) -> Unit) {
+        val frame = lastFrame
+        if (frame == null) {
+            done(null)
+            return
+        }
+        worker.post {
+            val bitmap = crop(frame, region)
+            main.post {
+                if (bitmap == null) done(null) else Ocr.read(bitmap, done)
+            }
+        }
+    }
+
+    private fun crop(frame: Frame, region: Rect): Bitmap? {
+        val left = (region.left / SCALE).coerceIn(0, frame.w - 1)
+        val top = (region.top / SCALE).coerceIn(0, frame.h - 1)
+        val right = (region.right / SCALE).coerceIn(left + 1, frame.w)
+        val bottom = (region.bottom / SCALE).coerceIn(top + 1, frame.h)
+        val w = right - left
+        val h = bottom - top
+        if (w < 8 || h < 8) return null
+
+        val pixels = IntArray(w * h)
+        for (y in 0 until h) {
+            val from = (top + y) * frame.w + left
+            val to = y * w
+            for (x in 0 until w) {
+                pixels[to + x] = frame.rgb[from + x] or (0xFF shl 24)
+            }
+        }
+        return try {
+            Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
+        } catch (t: Throwable) {
+            Log.e(TAG, "crop failed", t)
+            null
         }
     }
 

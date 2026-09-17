@@ -142,6 +142,26 @@ So a box takes roughly a second by default. Lower the three waits for a faster r
 them if the app is slow and a tick lands before the screen has caught up. They are plain
 milliseconds, so 1000 is one second and 2000 is two.
 
+## Noting down what was ticked
+
+**Note down the words under each box** (on by default) writes a line for every box just
+before it is ticked — before, because the pop-up covers the label afterwards.
+
+The label is taken from the app's own text when the app publishes any. When it publishes
+nothing, the strip of screen just under the box is read out of the picture the scan already
+took, using on-device text recognition (ML Kit, model bundled in the APK). Either way the
+reading happens on the phone; nothing is uploaded.
+
+**Show the notes** in the app lists them, shares them, or clears them:
+
+```
+1. [11:52:03] Accept the terms of service
+2. [11:52:05] Subscribe to the newsletter
+```
+
+The strip searched is the width of about six boxes and four boxes deep, centred under the
+box. A label sitting to the side rather than underneath is not picked up.
+
 ## Building locally
 
 ```

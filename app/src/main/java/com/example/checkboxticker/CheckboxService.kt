@@ -26,6 +26,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.TextView
 import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -40,6 +43,7 @@ class CheckboxService : AccessibilityService() {
     companion object {
         const val PREFS = "cfg"
         const val REPORT_FILE = "scan_report.txt"
+        const val NOTES_FILE = "notes.txt"
         const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
         @Volatile
         var instance: CheckboxService? = null
@@ -53,6 +57,7 @@ class CheckboxService : AccessibilityService() {
     private var running = false
     private var looping = false
     private var ticked = 0
+    private var notes = 0
     private var lastBox: Rect? = null
     private var autoMode = false
     private var silentRun = false
@@ -208,6 +213,11 @@ class CheckboxService : AccessibilityService() {
 
         if (targets.isNotEmpty()) {
             val node = targets[0]
+            if (p.getBoolean("notes", true)) {
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                note(textBelow(bounds) ?: (node.text ?: node.contentDescription)?.toString())
+            }
             val before = if (node.isCheckable) node.isChecked else null
             var ok = clickNode(node)
             if (!ok) ok = gestureTap(node)
@@ -229,12 +239,31 @@ class CheckboxService : AccessibilityService() {
             val box = boxes.firstOrNull { it != lastBox && !hitsBubble(it) }
             if (box == null) {
                 done(false)
-            } else {
-                showMarkers(listOf(box))
+                return@findBoxes
+            }
+
+            showMarkers(listOf(box))
+            val tap: () -> Unit = {
                 val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
                 if (ok) ticked++
                 lastBox = box
                 main.postDelayed({ done(ok) }, waitMs(p, "tickWaitMs", 300))
+            }
+
+            if (!p.getBoolean("notes", true)) {
+                tap()
+            } else {
+                // Read the label before tapping - afterwards the pop-up covers it.
+                val published = textBelow(box)
+                if (published != null) {
+                    note(published)
+                    tap()
+                } else {
+                    screen.readText(labelBand(box)) { read ->
+                        note(read)
+                        tap()
+                    }
+                }
             }
         }
     }
@@ -615,6 +644,62 @@ class CheckboxService : AccessibilityService() {
     } catch (e: Exception) {
         android.util.Log.e("CheckboxTicker", "tap failed", e)
         false
+    }
+
+    // ---------------------------------------------------------------- notes
+
+    /** The strip of screen just under a box, where its label usually sits. */
+    private fun labelBand(box: Rect): Rect {
+        val wide = maxOf(box.width() * 6, dp(160))
+        val deep = maxOf(box.height() * 4, dp(64))
+        return Rect(box.centerX() - wide, box.bottom, box.centerX() + wide, box.bottom + deep)
+    }
+
+    /** The nearest published text under [box], when the app publishes its text at all. */
+    private fun textBelow(box: Rect): String? {
+        val band = labelBand(box)
+        var best: String? = null
+        var bestGap = Int.MAX_VALUE
+        for (root in roots()) {
+            collectText(root, band, box) { text, gap ->
+                if (gap < bestGap) {
+                    bestGap = gap
+                    best = text
+                }
+            }
+        }
+        return best
+    }
+
+    private fun collectText(
+        node: AccessibilityNodeInfo?,
+        band: Rect,
+        box: Rect,
+        found: (String, Int) -> Unit
+    ) {
+        if (node == null) return
+        val text = (node.text ?: node.contentDescription ?: "").toString().trim()
+        if (text.isNotEmpty()) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (Rect.intersects(band, bounds)) found(text, maxOf(0, bounds.top - box.bottom))
+        }
+        for (i in 0 until node.childCount) collectText(node.getChild(i), band, box, found)
+    }
+
+    /** Writes one line for the box about to be ticked. */
+    private fun note(text: String?) {
+        val line = text?.trim()?.replace('\n', ' ')?.take(160)
+        if (line.isNullOrEmpty()) return
+        notes++
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        try {
+            openFileOutput(NOTES_FILE, Context.MODE_APPEND).use {
+                it.write("$notes. [$stamp] $line\n".toByteArray())
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "could not write the note", e)
+        }
     }
 
     // ---------------------------------------------------------------- scan report
