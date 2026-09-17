@@ -60,6 +60,13 @@ class CheckboxService : AccessibilityService() {
     private var ticked = 0
     private var notes = 0
     private var lastBox: Rect? = null
+    private var panel: TextView? = null
+    private val missed = ArrayList<String>()
+    private val tried = ArrayList<Rect>()
+    private var currentBox: Rect? = null
+    private var currentNode: AccessibilityNodeInfo? = null
+    private var currentBefore: Boolean? = null
+    private var currentLabel: String? = null
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -168,6 +175,9 @@ class CheckboxService : AccessibilityService() {
         silentRun = false
         ticked = 0
         lastBox = null
+        tried.clear()
+        missed.clear()
+        hidePanel()
         updateBubble()
         if (prefs().getBoolean("practice", false)) {
             practiceRun()
