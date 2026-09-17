@@ -125,24 +125,11 @@ box no longer looks empty, so it drops out of the next look by itself.
 ## Running until you stop it
 
 START runs a cycle: tick one box → wait for the pop-up and tap its colour → scroll on →
-look again. Running out of boxes on screen is not the end: it scrolls and keeps looking, so
-a long list works through on its own.
+look again. It does not stop when it runs out of boxes, it scrolls and keeps looking, so a
+long list is worked through on its own. Press STOP (the same floating button, red while it
+runs) when you are done; *Stop now* in the app does the same.
 
-It stops by itself at the end of the page. A scroll that leaves the screen exactly as it
-was means nothing moved, and after two of those in a row the run ends with *Reached the end
-of the page*. Press STOP (the same floating button, red while it runs) to end it sooner;
-*Stop now* in the app does the same.
-
-**Full speed** (on by default) means no round waits on the clock at all. The pop-up is
-tapped the instant it appears, the next box is ticked the moment the pop-up has gone, and a
-scroll is followed the moment the page stops moving — checked every 60 ms against the
-screen itself. A fast phone runs fast and a slow one still keeps up. *Give up waiting after*
-(2.5 s) is the one limit: a pop-up that never appears is not waited for forever.
-
-The green rings are not drawn during a full-speed run, because they are on the screen the
-run is photographing.
-
-With full speed off, the three fixed waits are used instead:
+Each round takes as long as you allow it:
 
 | Setting | Default | What it waits for |
 | --- | --- | --- |

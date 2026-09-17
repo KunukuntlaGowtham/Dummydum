@@ -39,8 +39,6 @@ class MainActivity : Activity() {
     private lateinit var notes: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
-    private lateinit var fast: CheckBox
-    private lateinit var giveUpInput: EditText
     private lateinit var tickWaitInput: EditText
     private lateinit var clearWaitInput: EditText
     private lateinit var scrollWaitInput: EditText
@@ -139,18 +137,8 @@ class MainActivity : Activity() {
         root.addView(skipTopInput)
 
         root.addView(heading("Speed"))
-        fast = check("Full speed (wait for the screen, not the clock)", p.getBoolean("fast", true))
-        root.addView(fast)
-        root.addView(note("On: every step carries on the instant the screen is ready - the " +
-                "pop-up is tapped as it appears, the next box the moment it has gone. The app " +
-                "runs as fast as the phone allows and the three waits below are ignored. " +
-                "Needs screen reading."))
-
-        root.addView(label("Give up waiting after (ms)"))
-        giveUpInput = number(p.getInt("giveUpMs", 2500))
-        root.addView(giveUpInput)
-
-        root.addView(note("Used only when full speed is off. Milliseconds: 1000 is one second."))
+        root.addView(note("Milliseconds. 1000 is one second - lower is faster, but a screen " +
+                "that has not caught up yet gets ticked in the wrong place."))
 
         root.addView(label("After ticking a box (waits for the pop-up)"))
         tickWaitInput = number(p.getInt("tickWaitMs", 300))
@@ -233,8 +221,6 @@ class MainActivity : Activity() {
             .putBoolean("notes", notes.isChecked)
             .putInt("colour", parseColour(colourInput.text.toString()))
             .putInt("colourTol", tolInput.text.toString().toIntOrNull()?.coerceIn(0, 200) ?: 60)
-            .putBoolean("fast", fast.isChecked)
-            .putInt("giveUpMs", giveUpInput.text.toString().toIntOrNull()?.coerceIn(200, 20000) ?: 2500)
             .putInt("tickWaitMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
             .putInt("clearWaitMs", clearWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
             .putInt("scrollWaitMs", scrollWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)

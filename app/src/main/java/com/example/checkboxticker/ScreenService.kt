@@ -198,15 +198,12 @@ class ScreenService : Service() {
 
         var image = imageReader.acquireLatestImage()
         var tries = 0
-        val limit = if (lastFrame == null) 12 else 3
-        val pause = if (lastFrame == null) 40L else 15L
-        while (image == null && tries < limit) {
-            Thread.sleep(pause)
+        while (image == null && tries < 12) {
+            Thread.sleep(40)
             image = imageReader.acquireLatestImage()
             tries++
         }
-        // Nothing new means nothing moved, so the frame we already have is still the screen.
-        if (image == null) return lastFrame
+        if (image == null) return null
 
         try {
             val plane = image.planes[0]
@@ -237,33 +234,6 @@ class ScreenService : Service() {
         } finally {
             image.close()
         }
-    }
-
-    /**
-     * A cheap fingerprint of the screen. Two equal ones in a row mean nothing is moving;
-     * one that survives a scroll means the page did not move at all.
-     */
-    fun signature(done: (Long) -> Unit) {
-        worker.post {
-            val frame = grab()
-            val value = if (frame == null) 0L else fingerprint(frame)
-            main.post { done(value) }
-        }
-    }
-
-    private fun fingerprint(frame: Frame): Long {
-        var value = 1125899906842597L
-        var y = 0
-        while (y < frame.h) {
-            val row = y * frame.w
-            var x = 0
-            while (x < frame.w) {
-                value = value * 31 + frame.rgb[row + x]
-                x += 7
-            }
-            y += 7
-        }
-        return value
     }
 
     /**
