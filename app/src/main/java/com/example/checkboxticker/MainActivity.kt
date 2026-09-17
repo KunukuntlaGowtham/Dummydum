@@ -137,18 +137,18 @@ class MainActivity : Activity() {
 
     /** Shows what the service could see the last time a screen was scanned. */
     private fun showReport() {
-        val text = try {
+        val report = try {
             openFileInput(CheckboxService.REPORT_FILE).bufferedReader().use { it.readText() }
         } catch (e: Exception) {
             ""
         }
-        if (text.isBlank()) {
+        if (report.isBlank()) {
             toast("Hold the floating button on the screen that is not working first")
             return
         }
 
         val body = TextView(this).apply {
-            this.text = text
+            this.text = report
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -161,7 +161,7 @@ class MainActivity : Activity() {
                 val send = Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
                     putExtra(Intent.EXTRA_SUBJECT, "Checkbox Ticker scan report")
-                    putExtra(Intent.EXTRA_TEXT, text)
+                    putExtra(Intent.EXTRA_TEXT, report)
                 }
                 startActivity(Intent.createChooser(send, "Send scan report"))
             }

@@ -41,7 +41,7 @@ class CheckboxService : AccessibilityService() {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private var windows: WindowManager? = null
+    private var windowManager: WindowManager? = null
     private var bubble: TextView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
 
@@ -54,7 +54,7 @@ class CheckboxService : AccessibilityService() {
 
     override fun onServiceConnected() {
         instance = this
-        windows = getSystemService(WindowManager::class.java)
+        windowManager = getSystemService(WindowManager::class.java)
         applySettings()
     }
 
@@ -134,7 +134,7 @@ class CheckboxService : AccessibilityService() {
     private fun roots(): List<AccessibilityNodeInfo> {
         val out = ArrayList<AccessibilityNodeInfo>()
         try {
-            for (window in windows) {
+            for (window in getWindows()) {
                 if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
                 val root = window.root ?: continue
                 if (root.packageName?.toString() == packageName) continue
@@ -326,7 +326,7 @@ class CheckboxService : AccessibilityService() {
         sb.append("android ").append(Build.VERSION.SDK_INT)
             .append(" / ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n")
 
-        val list = try { windows } catch (e: Exception) { emptyList<AccessibilityWindowInfo>() }
+        val list = try { getWindows() } catch (e: Exception) { emptyList<AccessibilityWindowInfo>() }
         sb.append("windows: ").append(list.size).append("\n")
 
         val roots = ArrayList<Pair<String, AccessibilityNodeInfo>>()
@@ -409,7 +409,7 @@ class CheckboxService : AccessibilityService() {
 
     private fun showBubble() {
         if (bubble != null) return
-        val manager = windows ?: return
+        val manager = windowManager ?: return
 
         val view = TextView(this).apply {
             gravity = Gravity.CENTER
@@ -495,7 +495,7 @@ class CheckboxService : AccessibilityService() {
     private fun hideBubble() {
         val view = bubble ?: return
         try {
-            windows?.removeView(view)
+            windowManager?.removeView(view)
         } catch (e: Exception) {
             // already removed
         }
