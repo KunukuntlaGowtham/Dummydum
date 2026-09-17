@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Checkbox Ticker</string>
+    <string name="acc_desc">Lets Checkbox Ticker find checkboxes on screen and tick them for you.</string>
+</resources>
