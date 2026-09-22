@@ -175,6 +175,8 @@ class MainActivity : Activity() {
                 "what it found, what it tapped, when it scrolled. That is what to read when a " +
                 "run does nothing."))
 
+        root.addView(button("Show failed boxes") { showFailed() })
+
         root.addView(button("Show last scan report") { showReport() })
 
         root.addView(button("3. Start in 5 seconds (open your app now)") {
@@ -243,6 +245,42 @@ class MainActivity : Activity() {
                 .putExtra("data", data)
         )
         toast("Screen reading is on")
+    }
+
+    /** The boxes that would not tick, by their number in the run. */
+    private fun showFailed() {
+        val list = try {
+            openFileInput(CheckboxService.FAILED_FILE).bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            ""
+        }
+        if (list.isBlank()) {
+            toast("Nothing has failed yet")
+            return
+        }
+        val body = TextView(this).apply {
+            text = list
+            setTextIsSelectable(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Failed boxes")
+            .setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton("Share") { _, _ ->
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Checkbox Ticker - failed boxes")
+                    putExtra(Intent.EXTRA_TEXT, list)
+                }
+                startActivity(Intent.createChooser(send, "Send"))
+            }
+            .setNeutralButton("Clear") { _, _ ->
+                deleteFile(CheckboxService.FAILED_FILE)
+                toast("Cleared")
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     /** Shows what the service could see the last time a screen was scanned. */
