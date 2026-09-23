@@ -11,6 +11,47 @@ import kotlin.math.abs
  */
 object PageShift {
 
+    /** Where a checkbox's middle was on screen, in screen pixels. */
+    data class Spot(val x: Int, val y: Int)
+
+    /**
+     * How far the page moved, read from the checkboxes seen just before and just after the
+     * scroll. This is the reliable measure: boxes that were not touched move exactly as the
+     * page does, and at the bottom of a page - where the page does not move - the box that
+     * would not tick and the ones below it are all still in exactly the same place.
+     *
+     * Every pairing of a box before with a box after in the same column suggests a movement.
+     * Only movements a swipe up can cause are counted: the page's content goes up, by nothing
+     * up to half as far again as the swipe. The movement most pairs agree on wins; on a tie,
+     * the smaller one. Returns null when no box can be paired, so the caller can fall back.
+     */
+    fun fromBoxes(before: List<Spot>, after: List<Spot>, swipe: Int, tolerance: Int): Int? {
+        val most = swipe * 3 / 2 + tolerance
+        val moves = ArrayList<Int>()
+        for (a in before) {
+            for (b in after) {
+                if (abs(a.x - b.x) > tolerance) continue
+                val moved = a.y - b.y                  // content goes up: its y gets smaller
+                if (moved < -tolerance || moved > most) continue
+                moves.add(moved)
+            }
+        }
+        if (moves.isEmpty()) return null
+
+        var best = 0
+        var bestVotes = 0
+        for (m in moves) {
+            val agreeing = moves.filter { abs(it - m) <= tolerance }
+            val votes = agreeing.size
+            val centre = agreeing.sum() / votes
+            if (votes > bestVotes || (votes == bestVotes && abs(centre) < abs(best))) {
+                bestVotes = votes
+                best = centre
+            }
+        }
+        return best.coerceAtLeast(0)
+    }
+
     /**
      * Compares the row profiles - the average brightness of each row - from before and after
      * the scroll. Content that moved up by d rows makes after[y] look like before[y + d]; the

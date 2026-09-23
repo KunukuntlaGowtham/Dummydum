@@ -66,6 +66,9 @@ class CheckboxService : AccessibilityService() {
     private var pendingBefore: Boolean? = null
     private var pendingNumber = 0
     private var profileBefore: IntArray? = null   // the screen's rows just before a scroll
+    private var lastSeen: List<Rect> = emptyList()      // the checkboxes in the latest scan
+    private var boxesBefore: List<Rect> = emptyList()   // the checkboxes just before a scroll
+    private var moveNote = ""                           // how far the last scroll went, for the status
     private var swipePx = 0                       // how far the last swipe asked to move
     private var lastMoved = 0                     // how far the page actually moved
     private var scrollPending = false
@@ -187,6 +190,9 @@ class CheckboxService : AccessibilityService() {
         pendingBefore = null
         pendingNumber = 0
         profileBefore = null
+        lastSeen = emptyList()
+        boxesBefore = emptyList()
+        moveNote = ""
         swipePx = 0
         lastMoved = 0
         scrollPending = false
@@ -218,7 +224,7 @@ class CheckboxService : AccessibilityService() {
 
         val node = treeTarget(p)
         if (node != null) {
-            applyScroll(null, null)
+            applyScroll(null, null, emptyList())
             settleUp(null)
             tryNode(node, p)
             return
@@ -226,7 +232,7 @@ class CheckboxService : AccessibilityService() {
 
         val screen = ScreenService.instance
         if (!p.getBoolean("pixels", true) || screen == null) {
-            applyScroll(null, null)
+            applyScroll(null, null, emptyList())
             settleUp(null)
             status("nothing in the tree, and screen reading is off")
             scrollOn(p)
@@ -235,9 +241,11 @@ class CheckboxService : AccessibilityService() {
 
         screen.findBoxesWithProfile(dp(14), dp(48)) { boxes, profile ->
             if (!looping) return@findBoxesWithProfile
+            val seen = boxes.filter { !hitsBubble(it) }
             // First move the tried boxes by how far the page really went, so both the verdict
             // on the last box and the choice of the next one see them in the right place.
-            applyScroll(screen, profile)
+            applyScroll(screen, profile, seen)
+            lastSeen = seen
             settleUp(boxes)
 
             val box = boxes.firstOrNull { found ->
@@ -249,7 +257,8 @@ class CheckboxService : AccessibilityService() {
                     stopLoop("Reached the end of the page")
                     return@findBoxesWithProfile
                 }
-                status("nothing new here (${boxes.size} seen) - scrolling on")
+                status("nothing new here (${boxes.size} seen) - scrolling on$moveNote")
+                moveNote = ""
                 scrollOn(p)
                 return@findBoxesWithProfile
             }
@@ -264,7 +273,8 @@ class CheckboxService : AccessibilityService() {
             val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
             if (ok) ticked++
             status("box $attempts: tapped ${box.centerX()},${box.centerY()}" +
-                    (if (ok) "" else " - refused"))
+                    (if (ok) "" else " - refused") + moveNote)
+            moveNote = ""
             main.postDelayed({
                 if (looping) afterTick { if (looping) scrollOn(prefs()) }
             }, waitMs(p, "tickWaitMs", 300))
@@ -355,6 +365,7 @@ class CheckboxService : AccessibilityService() {
         val go = { before: IntArray? ->
             if (looping) {
                 profileBefore = before
+                boxesBefore = lastSeen            // the boxes on screen just before the swipe
                 status("scrolling $mm mm")
                 swipePx = scrollScreen(mm)
                 scrollPending = true
@@ -373,19 +384,35 @@ class CheckboxService : AccessibilityService() {
      * goes on to the boxes below it instead of pressing it again. Without screen reading only
      * the swipe's length is known.
      */
-    private fun applyScroll(screen: ScreenService?, after: IntArray?) {
+    private fun applyScroll(screen: ScreenService?, after: IntArray?, boxesAfter: List<Rect>) {
         if (!scrollPending) return
         scrollPending = false
 
         val before = profileBefore
         profileBefore = null
-        lastMoved = if (screen != null && before != null && after != null) {
-            val expected = screen.screenToRows(swipePx)
-            screen.rowsToScreen(PageShift.measure(before, after, expected, expected * 2 + 20))
-        } else {
-            swipePx
+
+        // Best: the checkboxes themselves, before and after. At the bottom of the page the one
+        // that would not tick and those below it have not moved at all.
+        val fromBoxes = PageShift.fromBoxes(
+            boxesBefore.map { PageShift.Spot(it.centerX(), it.centerY()) },
+            boxesAfter.map { PageShift.Spot(it.centerX(), it.centerY()) },
+            swipePx,
+            dp(12)
+        )
+        boxesBefore = emptyList()
+
+        lastMoved = when {
+            fromBoxes != null -> fromBoxes
+            // No box to go by: compare the pictures row by row instead.
+            screen != null && before != null && after != null -> {
+                val expected = screen.screenToRows(swipePx)
+                screen.rowsToScreen(PageShift.measure(before, after, expected, expected * 2 + 20))
+            }
+            else -> swipePx
         }
         shiftTried(lastMoved)
+        moveNote = " (page moved $lastMoved of $swipePx px" +
+                (if (fromBoxes != null) ")" else ", no box to measure by)")
     }
 
     private fun shiftTried(moved: Int) {
