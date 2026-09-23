@@ -21,13 +21,3 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
-
-dependencies {
-    // PageShift is plain Kotlin and is checked on every build.
-    testImplementation("junit:junit:4.13.2")
-}
-
-// Name each test in the build log, so a green build shows what was checked.
-tasks.withType<Test>().configureEach {
-    testLogging { events("passed", "skipped", "failed") }
-}

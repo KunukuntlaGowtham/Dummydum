@@ -34,7 +34,6 @@ class ScreenService : Service() {
         const val TAG = "CheckboxTicker"
         const val CHANNEL = "ticker"
         const val SCALE = 2          // work on a half-size copy of the screen
-        const val CELL = 4           // pixels per cell across, in a sketch
 
         @Volatile
         var instance: ScreenService? = null
@@ -49,10 +48,6 @@ class ScreenService : Service() {
     private var reader: ImageReader? = null
     private var screenW = 0
     private var screenH = 0
-
-    /** The last picture taken. With nothing moving on screen Android sends no new one. */
-    @Volatile
-    private var lastFrame: Frame? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -156,102 +151,9 @@ class ScreenService : Service() {
     }
 
     /**
-     * A small grey copy of the screen, with our own windows ([skip], in screen pixels) left
-     * out. One taken before a scroll and one after say how far the page really moved - which
-     * at the bottom of a page is nothing.
+     * Grabs a frame, finds the empty boxes on it and hands them back on the main thread,
+     * in screen coordinates.
      */
-    fun sketch(skip: List<Rect>, done: (PageShift.Sketch?) -> Unit) {
-        worker.post {
-            val sketch = try {
-                grab()?.let { sketchOf(it, skip) }
-            } catch (t: Throwable) {
-                Log.e(TAG, "sketch failed", t)
-                null
-            }
-            main.post { done(sketch) }
-        }
-    }
-
-    /**
-     * One picture, two answers: the empty boxes on it (in screen coordinates) and its
-     * sketch.
-     */
-    fun findBoxesWithSketch(
-        minScreenPx: Int,
-        maxScreenPx: Int,
-        skip: List<Rect>,
-        done: (List<Rect>, PageShift.Sketch?) -> Unit
-    ) {
-        worker.post {
-            var boxes: List<Rect> = emptyList()
-            var sketch: PageShift.Sketch? = null
-            try {
-                val frame = grab()
-                if (frame != null) {
-                    boxes = detectIn(frame, minScreenPx / SCALE, maxScreenPx / SCALE)
-                    sketch = sketchOf(frame, skip)
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "screen scan failed", t)
-            }
-            main.post { done(boxes, sketch) }
-        }
-    }
-
-    /**
-     * The whole width of the screen, every row, each cell the average brightness of [CELL]
-     * pixels side by side. The status bar at the very top (its clock) and our own windows -
-     * whose text changes between the two pictures - are marked [PageShift.SKIP].
-     */
-    private fun sketchOf(frame: Frame, skip: List<Rect>): PageShift.Sketch {
-        val cols = frame.w / CELL
-        val rows = frame.h
-        val cells = IntArray(cols * rows)
-        for (y in 0 until rows) {
-            val row = y * frame.w
-            for (cx in 0 until cols) {
-                var sum = 0
-                val x0 = cx * CELL
-                for (x in x0 until x0 + CELL) {
-                    val c = frame.rgb[row + x]
-                    sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
-                            (c and 0xff) * 114) / 1000
-                }
-                cells[y * cols + cx] = sum / CELL
-            }
-        }
-
-        val statusBar = rows * 4 / 100
-        for (k in 0 until statusBar * cols) cells[k] = PageShift.SKIP
-        val sw = if (screenW > 0) screenW else frame.w * SCALE
-        val sh = if (screenH > 0) screenH else frame.h * SCALE
-        for (r in skip) {
-            val left = (r.left.toLong() * frame.w / sw / CELL).toInt().coerceIn(0, cols)
-            val right = ((r.right.toLong() * frame.w / sw + CELL - 1) / CELL).toInt().coerceIn(0, cols)
-            val top = (r.top.toLong() * rows / sh).toInt().coerceIn(0, rows)
-            val bottom = (r.bottom.toLong() * rows / sh + 1).toInt().coerceIn(0, rows)
-            for (y in top until bottom) {
-                for (x in left until right) cells[y * cols + x] = PageShift.SKIP
-            }
-        }
-        return PageShift.Sketch(
-            cells, cols, rows,
-            pxPerCol = sw.toFloat() * CELL / frame.w,
-            pxPerRow = sh.toFloat() / rows
-        )
-    }
-
-    /** Sketch rows to screen pixels, and back. */
-    fun rowsToScreen(rows: Int): Int {
-        val h = lastFrame?.h ?: return rows * SCALE
-        return if (h > 0) (rows.toLong() * screenH / h).toInt() else rows * SCALE
-    }
-
-    fun screenToRows(px: Int): Int {
-        val h = lastFrame?.h ?: return px / SCALE
-        return if (screenH > 0) (px.toLong() * h / screenH).toInt() else px / SCALE
-    }
-
     fun findBoxes(minScreenPx: Int, maxScreenPx: Int, done: (List<Rect>) -> Unit) {
         worker.post {
             val boxes = try {
@@ -264,18 +166,8 @@ class ScreenService : Service() {
         }
     }
 
-    /**
-     * Finds the biggest solid block of one colour, at least [minW] x [minH] screen pixels,
-     * ignoring the top [skipTopPct] % of the screen.
-     */
-    fun findColour(
-        target: Int,
-        tolerance: Int,
-        skipTopPct: Int,
-        minW: Int,
-        minH: Int,
-        done: (Rect?) -> Unit
-    ) {
+    /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
+    fun findColour(target: Int, tolerance: Int, skipTopPct: Int, done: (Rect?) -> Unit) {
         worker.post {
             val box = try {
                 val frame = grab()
@@ -283,10 +175,7 @@ class ScreenService : Service() {
                     null
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
-                    BoxFinder.findColour(
-                        frame.rgb, frame.w, frame.h, target, tolerance, minY,
-                        minW / SCALE, minH / SCALE
-                    )
+                    BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
                         ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
                 }
             } catch (t: Throwable) {
@@ -305,17 +194,12 @@ class ScreenService : Service() {
 
         var image = imageReader.acquireLatestImage()
         var tries = 0
-        val known = lastFrame
-        val limit = if (known == null) 12 else 3
-        val pause = if (known == null) 40L else 15L
-        while (image == null && tries < limit) {
-            Thread.sleep(pause)
+        while (image == null && tries < 12) {
+            Thread.sleep(40)
             image = imageReader.acquireLatestImage()
             tries++
         }
-        // No new picture means nothing on screen changed - at the bottom of a page, a scroll
-        // that goes nowhere - so the last picture is still the screen.
-        if (image == null) return known
+        if (image == null) return null
 
         try {
             val plane = image.planes[0]
@@ -340,9 +224,7 @@ class ScreenService : Service() {
                     i += pixelStride
                 }
             }
-            val frame = Frame(rgb, w, h)
-            lastFrame = frame
-            return frame
+            return Frame(rgb, w, h)
         } finally {
             image.close()
         }
@@ -350,10 +232,6 @@ class ScreenService : Service() {
 
     private fun detect(minPx: Int, maxPx: Int): List<Rect> {
         val frame = grab() ?: return emptyList()
-        return detectIn(frame, minPx, maxPx)
-    }
-
-    private fun detectIn(frame: Frame, minPx: Int, maxPx: Int): List<Rect> {
         val lum = IntArray(frame.rgb.size)
         for (k in frame.rgb.indices) {
             val c = frame.rgb[k]

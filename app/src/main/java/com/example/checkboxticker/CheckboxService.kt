@@ -60,23 +60,27 @@ class CheckboxService : AccessibilityService() {
 
     private var attempts = 0                      // which box this is, counting the whole run
     private val failed = ArrayList<Int>()         // their places once earlier failures are out
-    private val failedBoxes = ArrayList<Int>()    // the same failures, as boxes of the run
-    private val triedLooks = ArrayList<BoxLook.Look>()  // what the last boxes tried look like
-    private val triedNodes = ArrayList<AccessibilityNodeInfo>()  // checkboxes the tree gave us, tried
-    private var treeHadTried = false              // the last look at the tree found only tried ones
-    private var pendingLook: BoxLook.Look? = null  // what the box waiting to be judged looks like
     private val tried = ArrayList<Rect>()         // boxes already had a go, moved with the page
     private var pendingBox: Rect? = null          // the box waiting to be judged
     private var pendingNode: AccessibilityNodeInfo? = null
     private var pendingBefore: Boolean? = null
     private var pendingNumber = 0
-    private var sketchBefore: PageShift.Sketch? = null   // the screen just before a scroll
-    private var moveNote = ""                           // how far the last scroll went, for the status
-    private var swipePx = 0                       // how far the last swipe asked to move
-    private var lastMoved = 0                     // how far the page actually moved
-    private var scrollPending = false
-    private var scrolledOnce = false
-    private var emptyScrolls = 0                  // scrolls in a row that found nothing new
+    private val failedRun = ArrayList<Int>()      // the same failures, as boxes of the run
+
+    // The way out when one box keeps failing: tick from the bottom up to it, then stop.
+    private var reverse = false
+    private var stuckNode: AccessibilityNodeInfo? = null  // the box that kept failing, by tree
+    private var stuckBox: Rect? = null            // ... or by sight, where it is on screen
+    private var stuckShown = 0                    // its number as shown
+    private var stuckRun = 0                      // which box of the run it is
+    private var reverseTaps = 0                   // boxes tapped from the bottom up so far
+    private val reverseFailed = ArrayList<Int>()  // which of those would not tick (0 = lowest)
+    private val reverseTried = ArrayList<Rect>()
+    private val reverseTriedNodes = ArrayList<AccessibilityNodeInfo>()
+    private var reversePendingBox: Rect? = null
+    private var reversePendingNode: AccessibilityNodeInfo? = null
+    private var reversePendingBefore: Boolean? = null
+    private var reversePendingIndex = -1
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -188,23 +192,22 @@ class CheckboxService : AccessibilityService() {
         updateBubble()
         attempts = 0
         failed.clear()
-        failedBoxes.clear()
+        failedRun.clear()
         tried.clear()
-        triedLooks.clear()
-        triedNodes.clear()
-        treeHadTried = false
-        pendingLook = null
         pendingBox = null
         pendingNode = null
         pendingBefore = null
         pendingNumber = 0
-        sketchBefore = null
-        moveNote = ""
-        swipePx = 0
-        lastMoved = 0
-        scrollPending = false
-        scrolledOnce = false
-        emptyScrolls = 0
+        reverse = false
+        stuckNode = null
+        stuckBox = null
+        reverseTaps = 0
+        reverseFailed.clear()
+        reverseTried.clear()
+        reverseTriedNodes.clear()
+        reversePendingBox = null
+        reversePendingNode = null
+        reversePendingBefore = null
         toast("Running - press STOP to finish")
         status("Started")
         step()
@@ -214,6 +217,7 @@ class CheckboxService : AccessibilityService() {
         if (!looping) return
         looping = false
         running = false
+        reverse = false
         lastBox = null
         updateBubble()
         status("$why - tried $attempts, ticked $ticked")
@@ -229,88 +233,62 @@ class CheckboxService : AccessibilityService() {
     private fun step() {
         if (!looping) return
         val p = prefs()
+        if (reverse) {
+            reverseStep(p)
+            return
+        }
 
         val node = treeTarget(p)
         if (node != null) {
-            applyScroll(null, null)
             settleUp(null)
-            if (!looping) return
-            tryNode(node, p)
-            return
-        }
-        if (treeHadTried) {
-            // The page's checkboxes are in the tree, and every one on screen has had its go.
-            // Scroll on for new ones - never switch to tapping by sight here, which would press
-            // the same boxes a second time.
-            applyScroll(null, null)
-            settleUp(null)
-            if (!looping) return
-            if (scrolledOnce && emptyScrolls >= 3) {
-                stopLoop("Reached the end of the page")
+            if (reverse) {
+                reverseStep(p)
                 return
             }
-            status("nothing new here - scrolling on")
-            emptyScrolls++
-            scrollOn(p)
+            tryNode(node, p)
             return
         }
 
         val screen = ScreenService.instance
         if (!p.getBoolean("pixels", true) || screen == null) {
-            applyScroll(null, null)
             settleUp(null)
+            if (reverse) {
+                reverseStep(p)
+                return
+            }
             status("nothing in the tree, and screen reading is off")
             scrollOn(p)
             return
         }
 
-        screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
-            if (!looping) return@findBoxesWithSketch
-            // First move the tried boxes by how far the page really went, so both the verdict
-            // on the last box and the choice of the next one see them in the right place.
-            applyScroll(screen, sketch)
-            val looks = if (sketch == null) null else boxes.map { lookOf(sketch, it) }
-            settleUp(boxes, looks)
-            if (!looping) return@findBoxesWithSketch
-
-            val index = boxes.indices.firstOrNull { i ->
-                !hitsBubble(boxes[i]) && !alreadyTried(boxes[i], looks?.get(i))
+        screen.findBoxes(dp(14), dp(48)) { boxes ->
+            if (!looping) return@findBoxes
+            settleUp(boxes)
+            if (reverse) {
+                reverseStep(p)
+                return@findBoxes
             }
-            val box = index?.let { boxes[it] }
+
+            val box = boxes.firstOrNull { found ->
+                !hitsBubble(found) && tried.none { Rect.intersects(it, found) }
+            }
             if (box == null) {
-                // Nothing untried left, and the last scroll went nowhere: the page is done.
-                // Three scrolls in a row with nothing new also means the end, whatever the
-                // measurement says.
-                if (scrolledOnce && (lastMoved < dp(8) || emptyScrolls >= 3)) {
-                    stopLoop("Reached the end of the page")
-                    return@findBoxesWithSketch
-                }
-                status("nothing new here (${boxes.size} seen) - scrolling on$moveNote")
-                moveNote = ""
-                emptyScrolls++
+                status("nothing new here (${boxes.size} seen) - scrolling on")
                 scrollOn(p)
-                return@findBoxesWithSketch
+                return@findBoxes
             }
 
-            emptyScrolls = 0
             attempts++
             pendingBox = Rect(box)
             pendingNode = null
             pendingBefore = null
             pendingNumber = attempts
             tried.add(Rect(box))
-            val look = if (index != null) looks?.get(index) else null
-            pendingLook = look
-            if (look != null) {
-                triedLooks.add(look)
-                if (triedLooks.size > 20) triedLooks.removeAt(0)
-            }
 
             val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
             if (ok) ticked++
             status("box $attempts: tapped ${box.centerX()},${box.centerY()}" +
-                    (if (ok) "" else " - refused") + moveNote)
-            moveNote = ""
+                    (if (ok) "" else " - refused"))
             main.postDelayed({
                 if (looping) afterTick { if (looping) scrollOn(prefs()) }
             }, waitMs(p, "tickWaitMs", 300))
@@ -325,7 +303,6 @@ class CheckboxService : AccessibilityService() {
             loose = p.getBoolean("loose", true)
         )
         val targets = ArrayList<AccessibilityNodeInfo>()
-        treeHadTried = false
         for (root in roots()) {
             collect(root, targets, rules, 1)
             if (targets.isNotEmpty()) break
@@ -334,9 +311,7 @@ class CheckboxService : AccessibilityService() {
     }
 
     private fun tryNode(node: AccessibilityNodeInfo, p: SharedPreferences) {
-        emptyScrolls = 0
         attempts++
-        triedNodes.add(node)
         pendingBox = null
         pendingNode = node
         pendingBefore = if (node.isCheckable) node.isChecked else null
@@ -358,40 +333,51 @@ class CheckboxService : AccessibilityService() {
      * has failed when an empty box is still sitting where it was. Nothing waits on the answer:
      * it falls out of the look this pass was taking anyway.
      */
-    private fun settleUp(boxes: List<Rect>?, looks: List<BoxLook.Look>? = null) {
+    private fun settleUp(boxes: List<Rect>?) {
         val node = pendingNode
         val before = pendingBefore
         val box = pendingBox
-        val look = pendingLook
         val number = pendingNumber
         pendingNode = null
         pendingBefore = null
         pendingBox = null
-        pendingLook = null
         pendingNumber = 0
         if (number <= 0) return
 
+        // By sight, the empty box still sitting where it was - as it is on screen now.
+        val stillThere = if (box != null && boxes != null) {
+            boxes.firstOrNull { Rect.intersects(it, box) }
+        } else {
+            null
+        }
         val itFailed = when {
             node != null && before != null -> !stateChanged(node, before)
-            // Still on screen, still empty, next to the same words: it did not tick.
-            look != null && looks != null -> looks.any { BoxLook.same(look, it) }
-            box != null && boxes != null -> boxes.any { Rect.intersects(it, box) }
+            box != null && boxes != null -> stillThere != null
             else -> false
         }
-        if (itFailed) recordFailure(number)
+        if (itFailed) recordFailure(number, node, stillThere)
     }
 
     /**
      * Writes down a box that would not tick. It is shown by its place once the earlier
      * failures are taken out of the list: boxes 5, 7 and 10 failing read as 5, 6 and 8.
      */
-    private fun recordFailure(number: Int) {
+    private fun recordFailure(
+        number: Int,
+        node: AccessibilityNodeInfo? = null,
+        box: Rect? = null
+    ) {
         val shown = number - failed.size
+        if (!reverse && failed.isNotEmpty() && failed.last() == shown &&
+            (node != null || box != null)
+        ) {
+            // The same number again: the run is stuck on one box. It stays listed once, and
+            // the boxes below it are ticked from the bottom up instead.
+            enterReverse(shown, failedRun.last(), node, box)
+            return
+        }
         failed.add(shown)
-        failedBoxes.add(number)
-        // A safety net: if boxes stop ticking altogether, stop rather than go round forever.
-        val inARow = failedBoxes.size >= 8 &&
-                failedBoxes.takeLast(8).let { it.last() - it.first() == 7 }
+        failedRun.add(number)
         try {
             openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
                 it.write("box $number of the run, shown as $shown\n".toByteArray())
@@ -400,55 +386,173 @@ class CheckboxService : AccessibilityService() {
             android.util.Log.e("CheckboxTicker", "could not write the failure", e)
         }
         updatePanel()
-        if (inARow) stopLoop("8 boxes in a row would not tick")
+    }
+
+    // ------------------------------------------------------- from the bottom up to the stuck box
+
+    private fun enterReverse(shown: Int, run: Int, node: AccessibilityNodeInfo?, box: Rect?) {
+        reverse = true
+        stuckShown = shown
+        stuckRun = run
+        stuckNode = node
+        stuckBox = box?.let { Rect(it) }
+        reverseTaps = 0
+        reverseFailed.clear()
+        reverseTried.clear()
+        reverseTriedNodes.clear()
+        reversePendingBox = null
+        reversePendingNode = null
+        reversePendingBefore = null
+        status("box $shown keeps failing - ticking from the bottom up to it")
     }
 
     /**
-     * Scrolls on. A picture is taken just before the swipe, so the next scan can tell how far
-     * the page really moved - the tried boxes are moved by that, not by the swipe's length.
+     * One pass of the way out: settle up for the last box, then tap the lowest box still
+     * empty below the stuck one, clear the pop-up, scroll back up a little, and go again.
+     * When no box is left below the stuck one, the run stops there.
      */
-    private fun scrollOn(p: SharedPreferences) {
-        val mm = p.getInt("scrollMm", 20)
+    private fun reverseStep(p: SharedPreferences) {
+        if (!looping) return
+        val node = stuckNode
+        if (node != null) {
+            reverseByTree(p, node)
+            return
+        }
+        val stuck = stuckBox
         val screen = ScreenService.instance
-        val go = { before: PageShift.Sketch? ->
-            if (looping) {
-                sketchBefore = before
-                status("scrolling $mm mm")
-                swipePx = scrollScreen(mm)
-                scrollPending = true
-                scrolledOnce = true
-                lastBox = null
-                main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
+        if (stuck == null || screen == null) {
+            finishReverse()
+            return
+        }
+        screen.findBoxes(dp(14), dp(48)) { boxes ->
+            if (!looping) return@findBoxes
+            val last = reversePendingBox
+            if (last != null) {
+                if (boxes.any { Rect.intersects(it, last) }) reverseFailed.add(reversePendingIndex)
+                reversePendingBox = null
+            }
+            val below = stuck.bottom
+            val box = boxes
+                .filter { found ->
+                    !hitsBubble(found) && found.centerY() > below &&
+                            reverseTried.none { Rect.intersects(it, found) }
+                }
+                .maxByOrNull { it.centerY() }
+            if (box == null) {
+                finishReverse()
+                return@findBoxes
+            }
+            reverseTried.add(Rect(box))
+            reversePendingBox = Rect(box)
+            reversePendingIndex = reverseTaps
+            reverseTaps++
+            val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+            if (ok) ticked++
+            status("from the bottom, box ${reverseTaps}: tapped ${box.centerX()},${box.centerY()}" +
+                    (if (ok) "" else " - refused"))
+            main.postDelayed({
+                if (looping) afterTick { if (looping) scrollBack(prefs()) }
+            }, waitMs(p, "tickWaitMs", 300))
+        }
+    }
+
+    private fun reverseByTree(p: SharedPreferences, stuck: AccessibilityNodeInfo) {
+        val last = reversePendingNode
+        val before = reversePendingBefore
+        if (last != null) {
+            if (before != null && !stateChanged(last, before)) reverseFailed.add(reversePendingIndex)
+            reversePendingNode = null
+            reversePendingBefore = null
+        }
+
+        val stuckAt = Rect()
+        try {
+            stuck.refresh()
+            stuck.getBoundsInScreen(stuckAt)
+        } catch (e: Exception) {
+        }
+        val rules = Rules(
+            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
+            switches = p.getBoolean("switches", true),
+            radios = p.getBoolean("radios", false),
+            loose = p.getBoolean("loose", true)
+        )
+        val targets = ArrayList<AccessibilityNodeInfo>()
+        for (root in roots()) collect(root, targets, rules, 200)
+        val node = targets
+            .filter { found ->
+                found != stuck && reverseTriedNodes.none { it == found } &&
+                        boundsOf(found).centerY() > stuckAt.bottom
+            }
+            .maxByOrNull { boundsOf(it).centerY() }
+        if (node == null) {
+            finishReverse()
+            return
+        }
+
+        reverseTriedNodes.add(node)
+        reversePendingNode = node
+        reversePendingBefore = if (node.isCheckable) node.isChecked else null
+        reversePendingIndex = reverseTaps
+        reverseTaps++
+        var ok = clickNode(node)
+        if (!ok) ok = gestureTap(node)
+        if (ok) ticked++
+        status("from the bottom, box $reverseTaps: clicked " +
+                (node.className ?: "a node").toString().substringAfterLast('.') +
+                (if (ok) "" else " - refused"))
+        main.postDelayed({
+            if (looping) afterTick { if (looping) scrollBack(prefs()) }
+        }, waitMs(p, "tickWaitMs", 300))
+    }
+
+    private fun boundsOf(node: AccessibilityNodeInfo): Rect {
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        return r
+    }
+
+    /** Scrolls back up by a couple of millimetres; what is on screen moves down with it. */
+    private fun scrollBack(p: SharedPreferences) {
+        val mm = p.getInt("backMm", 2)
+        status("scrolling back $mm mm")
+        val moved = scrollScreen(mm, up = true)
+        stuckBox?.offset(0, moved)
+        for (rect in reverseTried) rect.offset(0, moved)
+        reversePendingBox?.offset(0, moved)
+        main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
+    }
+
+    /**
+     * Stops at the stuck box. Boxes below it that would not tick are numbered like any other
+     * failure: the lowest tapped first was the last box of the run.
+     */
+    private fun finishReverse() {
+        val numbers = reverseFailed.map { stuckRun + reverseTaps - it }.sorted()
+        for (number in numbers) {
+            val shown = number - failed.size
+            failed.add(shown)
+            failedRun.add(number)
+            try {
+                openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
+                    it.write("box $number of the run, shown as $shown\n".toByteArray())
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("CheckboxTicker", "could not write the failure", e)
             }
         }
-        if (screen == null) go(null) else screen.sketch(ownWindows()) { before -> go(before) }
+        updatePanel()
+        stopLoop("Stopped at box $stuckShown, the one that kept failing")
     }
 
-    /**
-     * Moves the tried boxes up by how far the last scroll really moved the page, measured by
-     * comparing the pictures from either side of it. At the bottom of the page that is
-     * nothing, so a box that would not tick stays marked as tried where it is, and the run
-     * goes on to the boxes below it instead of pressing it again. Without screen reading only
-     * the swipe's length is known.
-     */
-    private fun applyScroll(screen: ScreenService?, after: PageShift.Sketch?) {
-        if (!scrollPending) return
-        scrollPending = false
-
-        val before = sketchBefore
-        sketchBefore = null
-
-        val measured = if (screen != null && before != null && after != null) {
-            val expected = screen.screenToRows(swipePx)
-            PageShift.measure(before, after, expected, expected * 3 / 2 + 20)
-                ?.let { screen.rowsToScreen(it) }
-        } else {
-            null
-        }
-        lastMoved = measured ?: swipePx
-        shiftTried(lastMoved)
-        moveNote = " (page moved $lastMoved of $swipePx px" +
-                (if (measured != null) ")" else ", not measured)")
+    private fun scrollOn(p: SharedPreferences) {
+        status("scrolling ${p.getInt("scrollMm", 20)} mm")
+        val moved = scrollScreen(p.getInt("scrollMm", 20))
+        // Boxes already tried travel up the screen with the page, so they stay recognised
+        // after the scroll and are never given a second go.
+        shiftTried(moved)
+        lastBox = null
+        main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
     }
 
     private fun shiftTried(moved: Int) {
@@ -459,14 +563,19 @@ class CheckboxService : AccessibilityService() {
     }
 
     /** A short, controlled swipe up, so the page moves on by about [mm] millimetres. */
-    private fun scrollScreen(mm: Int): Int {
+    private fun scrollScreen(mm: Int, up: Boolean = false): Int {
         val metrics = resources.displayMetrics
         val distance = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_MM, mm.coerceIn(1, 200).toFloat(), metrics
         )
         val x = metrics.widthPixels / 2f
-        val from = metrics.heightPixels * 0.7f
-        val to = (from - distance).coerceAtLeast(metrics.heightPixels * 0.1f)
+        // Up the page: the finger moves down, from higher on the screen.
+        val from = metrics.heightPixels * (if (up) 0.3f else 0.7f)
+        val to = if (up) {
+            (from + distance).coerceAtMost(metrics.heightPixels * 0.9f)
+        } else {
+            (from - distance).coerceAtLeast(metrics.heightPixels * 0.1f)
+        }
         try {
             val path = Path().apply { moveTo(x, from); lineTo(x, to) }
             val gesture = GestureDescription.Builder()
@@ -476,7 +585,7 @@ class CheckboxService : AccessibilityService() {
         } catch (e: Exception) {
             android.util.Log.e("CheckboxTicker", "scroll failed", e)
         }
-        return (from - to).toInt()
+        return abs(from - to).toInt()
     }
 
     private fun waitMs(p: SharedPreferences, key: String, fallback: Int) =
@@ -501,8 +610,7 @@ class CheckboxService : AccessibilityService() {
         val tally = if (failed.isEmpty()) {
             "none failed"
         } else {
-            "failed ${failed.size}: " + failed.joinToString(", ") +
-                    "\n(boxes " + failedBoxes.joinToString(", ") + " of the run)"
+            "failed ${failed.size}: " + failed.joinToString(", ")
         }
         view.text = "$lastStatus\n$tally"
     }
@@ -548,42 +656,6 @@ class CheckboxService : AccessibilityService() {
         val view = panel ?: return
         try { windowManager?.removeView(view) } catch (e: Exception) { }
         panel = null
-    }
-
-    /**
-     * A box together with what is written beside it: from just left of the box, 300 dp
-     * across and 140 dp down - on a form, the name, date of birth, age and number. Always
-     * the same size, whatever size the box was found at this time.
-     */
-    private fun lookOf(sketch: PageShift.Sketch, box: Rect): BoxLook.Look =
-        BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), dp(140))
-
-    /**
-     * Has this box had its go already? Recognised by how it and its words look, so the answer
-     * does not depend on how far the page scrolled - at the bottom of a page, where a swipe
-     * only makes the page bounce, the box that would not tick is still known for what it is.
-     * Without a picture, only where the tried boxes should be is known.
-     */
-    private fun alreadyTried(box: Rect, look: BoxLook.Look?): Boolean =
-        if (look != null && triedLooks.isNotEmpty()) {
-            triedLooks.any { BoxLook.same(it, look) }
-        } else {
-            tried.any { Rect.intersects(it, box) }
-        }
-
-    /** Where our own windows are on screen, left out when the page's movement is measured. */
-    private fun ownWindows(): List<Rect> = listOfNotNull(bounds(bubble), bounds(panel))
-
-    private fun bounds(candidate: View?): Rect? {
-        val view = candidate ?: return null
-        if (view.width <= 0 || view.height <= 0) return null
-        val where = IntArray(2)
-        view.getLocationOnScreen(where)
-        val pad = dp(8)
-        return Rect(
-            where[0] - pad, where[1] - pad,
-            where[0] + view.width + pad, where[1] + view.height + pad
-        )
     }
 
     /** Our own windows are on screen during a scan, so nothing under them is a checkbox. */
@@ -717,12 +789,10 @@ class CheckboxService : AccessibilityService() {
         val tolerance = p.getInt("colourTol", 60).coerceIn(0, 200)
         val skipTop = p.getInt("skipTopPct", 20).coerceIn(0, 90)
 
-        // The pop-up has already had the after-a-tick wait to appear. Only a button-sized
-        // block counts: when a box will not tick there is no pop-up, and tapping the page's
-        // own purple text (a card's number, "Back") instead would change the page.
-        screen.findColour(colour, tolerance, skipTop, dp(32), dp(16)) { box ->
+        // The pop-up has already had the after-a-tick wait to appear.
+        screen.findColour(colour, tolerance, skipTop) { box ->
             if (box == null) {
-                status("pop-up: no ${String.format("#%06X", colour)} button below the top $skipTop%")
+                status("pop-up: no ${String.format("#%06X", colour)} below the top $skipTop%")
                 next()
             } else {
                 showMarkers(listOf(box))
@@ -810,9 +880,7 @@ class CheckboxService : AccessibilityService() {
     ) {
         if (node == null || out.size >= max) return
         if (isTarget(node, rules)) {
-            // One that has had its go already - it would not tick - is passed over, so the
-            // run moves on to the next instead of clicking the same one again and again.
-            if (looping && triedNodes.any { it == node }) treeHadTried = true else out.add(node)
+            out.add(node)
             return  // a checkable row and its checkbox are the same tick, so stop here
         }
         for (i in 0 until node.childCount) {
