@@ -34,6 +34,7 @@ class ScreenService : Service() {
         const val TAG = "CheckboxTicker"
         const val CHANNEL = "ticker"
         const val SCALE = 2          // work on a half-size copy of the screen
+        const val CELL = 4           // pixels per cell across, in a sketch
 
         @Volatile
         var instance: ScreenService? = null
@@ -155,71 +156,88 @@ class ScreenService : Service() {
     }
 
     /**
-     * Grabs a frame, finds the empty boxes on it and hands them back on the main thread,
-     * in screen coordinates.
+     * A small grey copy of the screen, with our own windows ([skip], in screen pixels) left
+     * out. One taken before a scroll and one after say how far the page really moved - which
+     * at the bottom of a page is nothing.
      */
-    /**
-     * The average brightness of each row of the screen. One taken before a scroll and one
-     * after say how far the page really moved - which at the bottom of a page is nothing.
-     */
-    fun rowProfile(done: (IntArray?) -> Unit) {
+    fun sketch(skip: List<Rect>, done: (PageShift.Sketch?) -> Unit) {
         worker.post {
-            val profile = try {
-                grab()?.let { profileOf(it) }
+            val sketch = try {
+                grab()?.let { sketchOf(it, skip) }
             } catch (t: Throwable) {
-                Log.e(TAG, "profile failed", t)
+                Log.e(TAG, "sketch failed", t)
                 null
             }
-            main.post { done(profile) }
+            main.post { done(sketch) }
         }
     }
 
-    /** One picture, two answers: the boxes on it, and its row profile. */
-    fun findBoxesWithProfile(
+    /**
+     * One picture, two answers: the empty boxes on it (in screen coordinates) and its
+     * sketch.
+     */
+    fun findBoxesWithSketch(
         minScreenPx: Int,
         maxScreenPx: Int,
-        done: (List<Rect>, IntArray?) -> Unit
+        skip: List<Rect>,
+        done: (List<Rect>, PageShift.Sketch?) -> Unit
     ) {
         worker.post {
             var boxes: List<Rect> = emptyList()
-            var profile: IntArray? = null
+            var sketch: PageShift.Sketch? = null
             try {
                 val frame = grab()
                 if (frame != null) {
                     boxes = detectIn(frame, minScreenPx / SCALE, maxScreenPx / SCALE)
-                    profile = profileOf(frame)
+                    sketch = sketchOf(frame, skip)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "screen scan failed", t)
             }
-            main.post { done(boxes, profile) }
+            main.post { done(boxes, sketch) }
         }
     }
 
     /**
-     * Rows are averaged over the right-hand part of the screen only: the floating button and
-     * the status panel sit on the left and never move, and would pull every comparison
-     * towards "the page did not move".
+     * The whole width of the screen, every row, each cell the average brightness of [CELL]
+     * pixels side by side. The status bar at the very top (its clock) and our own windows -
+     * whose text changes between the two pictures - are marked [PageShift.SKIP].
      */
-    private fun profileOf(frame: Frame): IntArray {
-        val from = (frame.w * 55) / 100
-        val to = (frame.w * 95) / 100
-        val span = (to - from).coerceAtLeast(1)
-        val out = IntArray(frame.h)
-        for (y in 0 until frame.h) {
+    private fun sketchOf(frame: Frame, skip: List<Rect>): PageShift.Sketch {
+        val cols = frame.w / CELL
+        val rows = frame.h
+        val cells = IntArray(cols * rows)
+        for (y in 0 until rows) {
             val row = y * frame.w
-            var sum = 0
-            for (x in from until to) {
-                val c = frame.rgb[row + x]
-                sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
-                        (c and 0xff) * 114) / 1000
+            for (cx in 0 until cols) {
+                var sum = 0
+                val x0 = cx * CELL
+                for (x in x0 until x0 + CELL) {
+                    val c = frame.rgb[row + x]
+                    sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
+                            (c and 0xff) * 114) / 1000
+                }
+                cells[y * cols + cx] = sum / CELL
             }
-            out[y] = sum / span
         }
-        return out
+
+        val statusBar = rows * 4 / 100
+        for (k in 0 until statusBar * cols) cells[k] = PageShift.SKIP
+        val sw = if (screenW > 0) screenW else frame.w * SCALE
+        val sh = if (screenH > 0) screenH else frame.h * SCALE
+        for (r in skip) {
+            val left = (r.left.toLong() * frame.w / sw / CELL).toInt().coerceIn(0, cols)
+            val right = ((r.right.toLong() * frame.w / sw + CELL - 1) / CELL).toInt().coerceIn(0, cols)
+            val top = (r.top.toLong() * rows / sh).toInt().coerceIn(0, rows)
+            val bottom = (r.bottom.toLong() * rows / sh + 1).toInt().coerceIn(0, rows)
+            for (y in top until bottom) {
+                for (x in left until right) cells[y * cols + x] = PageShift.SKIP
+            }
+        }
+        return PageShift.Sketch(cells, cols, rows)
     }
 
-    /** Profile rows to screen pixels, and back. */
+    /** Sketch rows to screen pixels, and back. */
     fun rowsToScreen(rows: Int): Int {
         val h = lastFrame?.h ?: return rows * SCALE
         return if (h > 0) (rows.toLong() * screenH / h).toInt() else rows * SCALE
