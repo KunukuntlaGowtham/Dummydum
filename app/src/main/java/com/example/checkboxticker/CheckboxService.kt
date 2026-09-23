@@ -345,8 +345,8 @@ class CheckboxService : AccessibilityService() {
                 status("box ${seq.attempt}: pop-up cleared, checking the box")
                 main.postDelayed({
                     if (!looping) return@postDelayed
-                    screen.stillEmpty(box.toRect(), dp(14), dp(48)) { emptyAfter ->
-                        if (!looping) return@stillEmpty
+                    screen.stillEmpty(box.toRect(), dp(14), dp(48)) recheck@{ emptyAfter ->
+                        if (!looping) return@recheck
                         record(!emptyAfter)
                         scrollOn(p)
                     }
