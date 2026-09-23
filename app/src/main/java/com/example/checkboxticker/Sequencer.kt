@@ -3,7 +3,7 @@ package com.example.checkboxticker
 import kotlin.math.abs
 
 /**
- * A checkbox as found on one screenful, in screen pixels. Plain numbers rather than
+ * A checkbox as found by one scan, in screen pixels. Plain numbers rather than
  * android.graphics.Rect, so the run's logic can be tested away from a phone.
  */
 data class Box(val left: Int, val top: Int, val right: Int, val bottom: Int) {
@@ -12,36 +12,58 @@ data class Box(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     val height get() = bottom - top
 }
 
-/** Where the run is. Exactly one box is ever between TAP_CURRENT and RECORD. */
-enum class Phase { IDLE, FIND_CURRENT, TAP_CURRENT, VERIFY_CURRENT, CLEAR_POPUP, SCROLL }
+/**
+ * Where a run is. Every box goes through the same seven states, in this order, and no
+ * other order is accepted:
+ *
+ *   FIND_TARGET -> TAPPING -> VERIFYING -> RECORDING_RESULT -> CLEARING_POPUP
+ *               -> SCROLLING -> WAITING_FOR_SCROLL -> FIND_TARGET
+ *
+ * Two extra moves exist. VERIFYING -> VERIFYING is the one extra look at the same box
+ * when the screen may have been slow (a look, never a tap). FIND_TARGET -> SCROLLING is
+ * scrolling on when a scan finds nothing to do. Anything may go to IDLE, which is stopping.
+ */
+enum class TickState {
+    IDLE,
+    FIND_TARGET,
+    TAPPING,
+    VERIFYING,
+    RECORDING_RESULT,
+    CLEARING_POPUP,
+    SCROLLING,
+    WAITING_FOR_SCROLL
+}
 
-/** What a run has done so far, for the report and the status line. */
+/** A box that would not tick, by its place on the page and by its number in the report. */
 data class Failure(val physical: Int, val shown: Int)
 
 /**
- * The run's bookkeeping, and the rule that picks the next box.
+ * One run: the single box being dealt with, the counts, the order of the steps, and the
+ * rule that picks the next box.
  *
- * The rule is the whole fix. Boxes are identical and stay unchecked when a tap fails, so
- * "the first unchecked box on screen" can be the same failed box for ever. Instead the run
- * keeps a cursor: a line on the screen above which every box has been dealt with. A box is
- * dealt with the moment its result is recorded, and the line then sits just below it. Each
- * scroll moves the line up by however far the page actually moved. The next box is the first
- * unchecked one below the line - so a failed box, which is above it, can never come back,
- * without the run having to recognise it again after a scroll.
+ * The rule is what stops a failed box coming back. All boxes look the same and a failed one
+ * stays empty, so "the first empty box on screen" can be the same failed box for ever.
+ * Instead the run reads the page top to bottom, like a finger moving down it: there is a
+ * line across the screen, and every box above it has been dealt with. When a box's result
+ * is recorded, successful or not, the line drops to just below it. When the page scrolls,
+ * the line moves up with the page by however far the page actually moved. The next target
+ * is always the first empty box below the line in a fresh scan - so the failed box, which
+ * is above the line, is never chosen again. Nothing about the failed box itself has to be
+ * remembered or recognised; the line is only "how far down the page the run has got".
  */
 class Sequencer {
 
-    var phase = Phase.IDLE
+    var state = TickState.IDLE
         private set
 
-    /** The physical number of the box being dealt with, counting from 1 across the run. */
+    /** The physical number of the box in hand, counting from 1 down the page. */
     var attempt = 0
         private set
     var successes = 0
         private set
     val failures = ArrayList<Failure>()
 
-    /** Failures back to back - a run that only fails is stopped rather than left going. */
+    /** Failures back to back, for the optional "stop after n failures in a row". */
     var failStreak = 0
         private set
 
@@ -49,83 +71,108 @@ class Sequencer {
     var cursor: Int? = null
         private set
 
+    /** The one target of the run. Only ever set in TAPPING, VERIFYING and RECORDING_RESULT. */
     var current: Box? = null
         private set
 
+    val currentAttempt get() = attempt
+    val failedCount get() = failures.size
+
+    /** Whether [to] may follow the state the run is in now. */
+    fun canMove(to: TickState): Boolean = to == TickState.IDLE || to in NEXT.getValue(state)
+
+    /** Moves to [to] if that is a legal next step. Refuses, and changes nothing, if not. */
+    fun moveTo(to: TickState): Boolean {
+        if (!canMove(to)) return false
+        state = to
+        return true
+    }
+
     fun begin() {
-        phase = Phase.FIND_CURRENT
         attempt = 0
         successes = 0
         failures.clear()
         failStreak = 0
         cursor = null
         current = null
+        state = TickState.FIND_TARGET
     }
 
     fun stop() {
-        phase = Phase.IDLE
         current = null
+        state = TickState.IDLE
     }
 
-    /** FIND_CURRENT: the first unchecked box below the line, top to bottom. */
-    fun pick(found: List<Box>): Box? =
-        found.filter { box -> cursor.let { it == null || box.centerY > it } }
+    /** FIND_TARGET: of one fresh scan, the first empty box below the line. One, never more. */
+    fun pick(found: List<Box>): Box? {
+        if (state != TickState.FIND_TARGET) return null
+        return found.filter { box -> cursor.let { it == null || box.centerY > it } }
             .minByOrNull { it.top }
+    }
 
-    /** TAP_CURRENT: [box] is now the one box being dealt with. */
-    fun start(box: Box) {
+    /** FIND_TARGET -> TAPPING: [box] becomes the target, and the only one. */
+    fun start(box: Box): Boolean {
+        if (!moveTo(TickState.TAPPING)) return false
         attempt++
         current = box
-        phase = Phase.TAP_CURRENT
+        return true
     }
 
-    fun verifying() {
-        phase = Phase.VERIFY_CURRENT
-    }
-
-    /** RECORD, success. */
-    fun succeeded() {
+    /** VERIFYING -> RECORDING_RESULT, success. */
+    fun succeeded(): Boolean {
+        if (state != TickState.VERIFYING || !moveTo(TickState.RECORDING_RESULT)) return false
         successes++
         failStreak = 0
-        finishCurrent()
+        settleCurrent()
+        return true
     }
 
     /**
-     * RECORD, failure. Returns the number the box is shown as: its place once the boxes that
-     * failed before it are taken out, so physical 3, 6 and 9 failing read as 3, 5 and 7.
+     * VERIFYING -> RECORDING_RESULT, failure. Returns the number the box is shown as in the
+     * report - its place once the boxes that failed before it are taken out - or null if the
+     * run was not verifying. Physical 3, 6 and 9 failing are shown as 3, 5 and 7.
      */
-    fun failed(): Int {
-        val shown = attempt - failures.size
-        failures.add(Failure(attempt, shown))
+    fun failed(): Int? {
+        if (state != TickState.VERIFYING || !moveTo(TickState.RECORDING_RESULT)) return null
+        val displayedNumber = currentAttempt - failedCount
+        failures.add(Failure(attempt, displayedNumber))
         failStreak++
-        finishCurrent()
-        return shown
+        settleCurrent()
+        return displayedNumber
     }
 
-    /** The current box is settled: the line drops to just below it, and it is let go. */
-    private fun finishCurrent() {
+    /** The target is finished with: the line drops below it, and it stops being the target. */
+    private fun settleCurrent() {
         val box = current ?: return
         cursor = box.centerY + margin(box)
         current = null
-        phase = Phase.CLEAR_POPUP
     }
 
-    fun scrolling() {
-        phase = Phase.SCROLL
-    }
-
-    /** SCROLL done: the page moved up by [movedPx], and the line with it. */
-    fun scrolled(movedPx: Int) {
+    /** WAITING_FOR_SCROLL -> FIND_TARGET: the page moved up by [movedPx], and the line too. */
+    fun scrolled(movedPx: Int): Boolean {
+        if (!moveTo(TickState.FIND_TARGET)) return false
         cursor = cursor?.minus(movedPx)
-        phase = Phase.FIND_CURRENT
+        return true
     }
 
     companion object {
 
+        /** The legal next steps from each state. IDLE is always allowed on top of these. */
+        private val NEXT: Map<TickState, Set<TickState>> = mapOf(
+            TickState.IDLE to setOf(TickState.FIND_TARGET),
+            TickState.FIND_TARGET to setOf(TickState.TAPPING, TickState.SCROLLING),
+            TickState.TAPPING to setOf(TickState.VERIFYING),
+            TickState.VERIFYING to setOf(TickState.VERIFYING, TickState.RECORDING_RESULT),
+            TickState.RECORDING_RESULT to setOf(TickState.CLEARING_POPUP),
+            TickState.CLEARING_POPUP to setOf(TickState.SCROLLING),
+            TickState.SCROLLING to setOf(TickState.WAITING_FOR_SCROLL),
+            TickState.WAITING_FOR_SCROLL to setOf(TickState.FIND_TARGET)
+        )
+
         /**
-         * How far below a settled box's middle the line sits. More than half a box, so the
-         * box itself is always above it even if the page's movement is misjudged by a few
-         * pixels; far less than the gap to the next box, so that one is never skipped.
+         * How far below a finished box's middle the line sits. More than half a box, so the
+         * box stays above the line even if the page's movement is misread by a few pixels;
+         * far less than the gap to the next box, so that one is never skipped.
          */
         fun margin(box: Box) = (box.height * 3) / 5 + 4
 

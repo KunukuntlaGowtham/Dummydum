@@ -1,15 +1,18 @@
 package com.example.checkboxticker
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Drives the Sequencer against a pretend page the way the service does: look, pick one box,
- * tap it, record the result, scroll, look again. The page knows which box is which; the
- * Sequencer does not - it only ever sees identical rectangles on the current screenful.
+ * Drives the Sequencer against a pretend page exactly the way the service does - one fresh
+ * scan, one target, tap, verify, record, clear the pop-up, scroll, wait, fresh scan - and
+ * checks what the service must guarantee. The page knows which box is which; the Sequencer
+ * does not, it only ever sees identical rectangles from the current scan.
  */
 class SequencerTest {
 
@@ -24,11 +27,12 @@ class SequencerTest {
     ) {
         var offset = 0
         val checked = BooleanArray(count)
+        val taps = IntArray(count)
 
         private fun pageY(i: Int) = firstY + i * spacing
 
-        /** The unchecked boxes on screen, as identical rectangles. */
-        fun visible(): List<Box> = (0 until count)
+        /** A fresh scan: the unchecked boxes on screen, as identical rectangles. */
+        fun scan(): List<Box> = (0 until count)
             .filter { !checked[it] }
             .map { pageY(it) - offset }
             .filter { it >= 0 && it + boxSize <= screenHeight }
@@ -45,41 +49,80 @@ class SequencerTest {
         }
     }
 
-    private class Outcome(val order: List<Int>, val shown: List<Int>, val physical: List<Int>)
+    private class Outcome(
+        val order: List<Int>,
+        val shown: List<Int>,
+        val physical: List<Int>,
+        val traces: List<List<TickState>>
+    )
 
     private fun run(page: Page, failing: Set<Int>, scrollPx: Int = 315): Outcome {
         val seq = Sequencer()
         seq.begin()
         val order = ArrayList<Int>()
+        val traces = ArrayList<List<TickState>>()
         var steps = 0
 
         while (steps++ < 1000) {
-            val box = seq.pick(page.visible())
+            assertEquals(TickState.FIND_TARGET, seq.state)
+            val scan = page.scan()                       // one fresh scan ...
+            val box = seq.pick(scan)                      // ... gives one target at most
+
             if (box == null) {
+                assertTrue(seq.moveTo(TickState.SCROLLING))
                 val moved = page.scroll(scrollPx)
-                if (moved == 0) break                  // end of page, nothing below the line
-                seq.scrolled(moved)
+                assertTrue(seq.moveTo(TickState.WAITING_FOR_SCROLL))
+                if (moved == 0) break                     // end of page, nothing below the line
+                assertTrue(seq.scrolled(moved))
                 continue
             }
 
-            seq.start(box)
+            val trace = arrayListOf(seq.state)
+            assertTrue(seq.start(box)); trace.add(seq.state)
             val physical = page.physicalOf(box)
+            page.taps[physical - 1]++
             order.add(physical)
             assertEquals("the run's count must be the box's place on the page",
-                physical, seq.attempt)
+                physical, seq.currentAttempt)
 
+            // Nothing may pick a second target while this one is in hand.
+            assertNull(seq.pick(scan))
+
+            assertTrue(seq.moveTo(TickState.VERIFYING)); trace.add(seq.state)
             if (physical in failing) {
-                seq.failed()                           // stays unchecked on the page
+                assertTrue(seq.failed() != null)          // stays unchecked on the page
             } else {
                 page.checked[physical - 1] = true
-                seq.succeeded()
+                assertTrue(seq.succeeded())
             }
-            seq.scrolling()
-            seq.scrolled(page.scroll(scrollPx))
+            trace.add(seq.state)
+            assertNull("the target is let go once recorded", seq.current)
+
+            assertTrue(seq.moveTo(TickState.CLEARING_POPUP)); trace.add(seq.state)
+            assertTrue(seq.moveTo(TickState.SCROLLING)); trace.add(seq.state)
+            val moved = page.scroll(scrollPx)
+            assertTrue(seq.moveTo(TickState.WAITING_FOR_SCROLL)); trace.add(seq.state)
+            assertTrue(seq.scrolled(moved))
+            traces.add(trace)
         }
         assertTrue("the run must end by itself", steps < 1000)
-        return Outcome(order, seq.failures.map { it.shown }, seq.failures.map { it.physical })
+        for (i in 0 until page.count) {
+            assertTrue("box ${i + 1} was tapped ${page.taps[i]} times", page.taps[i] <= 1)
+        }
+        return Outcome(order, seq.failures.map { it.shown }, seq.failures.map { it.physical }, traces)
     }
+
+    private val cycle = listOf(
+        TickState.FIND_TARGET,
+        TickState.TAPPING,
+        TickState.VERIFYING,
+        TickState.RECORDING_RESULT,
+        TickState.CLEARING_POPUP,
+        TickState.SCROLLING,
+        TickState.WAITING_FOR_SCROLL
+    )
+
+    // ------------------------------------------------------------ the run
 
     @Test
     fun `failures at 3, 6 and 9 of 10 read as 3, 5 and 7`() {
@@ -90,10 +133,24 @@ class SequencerTest {
     }
 
     @Test
+    fun `every box goes through all seven steps in order, failures included`() {
+        val result = run(Page(count = 10, spacing = 700), setOf(3, 6, 9))
+        assertEquals(10, result.traces.size)
+        for (trace in result.traces) assertEquals(cycle, trace)
+    }
+
+    @Test
     fun `a failed box is never tapped twice`() {
         val result = run(Page(count = 15, spacing = 700), setOf(1, 2, 3, 8, 15))
-        assertEquals(result.order.size, result.order.toSet().size)
         assertEquals((1..15).toList(), result.order)
+    }
+
+    @Test
+    fun `box 13 failing is tapped once and the run moves on`() {
+        val page = Page(count = 15, spacing = 700)
+        val result = run(page, setOf(13))
+        assertEquals(1, page.taps[12])
+        assertEquals(listOf(13, 14, 15), result.order.takeLast(3))
     }
 
     @Test
@@ -114,8 +171,7 @@ class SequencerTest {
 
     @Test
     fun `a page that swallows part of each swipe still moves on`() {
-        val page = Page(count = 10, spacing = 700, slop = 24)
-        val result = run(page, setOf(3, 6, 9))
+        val result = run(Page(count = 10, spacing = 700, slop = 24), setOf(3, 6, 9))
         assertEquals((1..10).toList(), result.order)
         assertEquals(listOf(3, 5, 7), result.shown)
     }
@@ -124,8 +180,64 @@ class SequencerTest {
     fun `every box failing is still a finite run`() {
         val result = run(Page(count = 10, spacing = 700), (1..10).toSet())
         assertEquals((1..10).toList(), result.order)
-        assertEquals((1..10).toList(), result.physical)
         assertEquals(List(10) { 1 }, result.shown)
+    }
+
+    // ------------------------------------------------------------ the order of the steps
+
+    private fun inState(target: TickState): Sequencer {
+        val seq = Sequencer()
+        seq.begin()
+        val path = cycle.drop(1)
+        for (next in path) {
+            if (seq.state == target) break
+            when (next) {
+                TickState.TAPPING -> assertTrue(seq.start(Box(0, 100, 60, 160)))
+                TickState.RECORDING_RESULT -> assertTrue(seq.succeeded())
+                else -> assertTrue(seq.moveTo(next))
+            }
+        }
+        assertEquals(target, seq.state)
+        return seq
+    }
+
+    @Test
+    fun `a second tap while one target is in hand is refused`() {
+        val seq = inState(TickState.TAPPING)
+        assertFalse(seq.moveTo(TickState.TAPPING))
+        assertFalse(seq.start(Box(0, 900, 60, 960)))
+        assertEquals(1, seq.currentAttempt)
+    }
+
+    @Test
+    fun `a tapped box cannot be abandoned for a new search`() {
+        assertFalse(inState(TickState.TAPPING).moveTo(TickState.FIND_TARGET))
+        assertFalse(inState(TickState.VERIFYING).moveTo(TickState.FIND_TARGET))
+    }
+
+    @Test
+    fun `a result cannot skip the pop-up or the scroll`() {
+        val recorded = inState(TickState.RECORDING_RESULT)
+        assertFalse(recorded.moveTo(TickState.FIND_TARGET))
+        assertFalse(recorded.moveTo(TickState.SCROLLING))
+        assertFalse(recorded.moveTo(TickState.TAPPING))
+        assertFalse(inState(TickState.CLEARING_POPUP).moveTo(TickState.FIND_TARGET))
+        assertFalse(inState(TickState.SCROLLING).moveTo(TickState.FIND_TARGET))
+    }
+
+    @Test
+    fun `a result can only be recorded while verifying`() {
+        assertFalse(inState(TickState.TAPPING).succeeded())
+        assertNull(inState(TickState.TAPPING).failed())
+        assertNull(inState(TickState.FIND_TARGET).failed())
+    }
+
+    @Test
+    fun `stopping is allowed from anywhere`() {
+        for (state in cycle) {
+            val seq = inState(state)
+            assertTrue(seq.moveTo(TickState.IDLE))
+        }
     }
 
     // ------------------------------------------------------------ measuring the scroll
