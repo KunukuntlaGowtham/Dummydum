@@ -373,6 +373,23 @@ class CheckboxService : AccessibilityService() {
         scrollBy(distance, p)
     }
 
+    /**
+     * Writes down a box that would not tick. It is shown by its place once the earlier
+     * failures are taken out of the list: boxes 5, 7 and 10 failing read as 5, 6 and 8.
+     */
+    private fun recordFailure(number: Int) {
+        val shown = number - failed.size
+        failed.add(shown)
+        try {
+            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
+                it.write("box $number of the run, shown as $shown\n".toByteArray())
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "could not write the failure", e)
+        }
+        updatePanel()
+    }
+
     /** Nothing new on screen. Twice in a row after scrolling means the end of the page. */
     private fun nothingNew(p: SharedPreferences) {
         emptyScreens++
