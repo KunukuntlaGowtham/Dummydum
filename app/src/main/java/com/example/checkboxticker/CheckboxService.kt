@@ -71,6 +71,7 @@ class CheckboxService : AccessibilityService() {
     private var lastMoved = 0                     // how far the page actually moved
     private var scrollPending = false
     private var scrolledOnce = false
+    private var emptyScrolls = 0                  // scrolls in a row that found nothing new
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -193,6 +194,7 @@ class CheckboxService : AccessibilityService() {
         lastMoved = 0
         scrollPending = false
         scrolledOnce = false
+        emptyScrolls = 0
         toast("Running - press STOP to finish")
         status("Started")
         step()
@@ -247,16 +249,20 @@ class CheckboxService : AccessibilityService() {
             }
             if (box == null) {
                 // Nothing untried left, and the last scroll went nowhere: the page is done.
-                if (scrolledOnce && lastMoved < dp(8)) {
+                // Three scrolls in a row with nothing new also means the end, whatever the
+                // measurement says.
+                if (scrolledOnce && (lastMoved < dp(8) || emptyScrolls >= 3)) {
                     stopLoop("Reached the end of the page")
                     return@findBoxesWithSketch
                 }
                 status("nothing new here (${boxes.size} seen) - scrolling on$moveNote")
                 moveNote = ""
+                emptyScrolls++
                 scrollOn(p)
                 return@findBoxesWithSketch
             }
 
+            emptyScrolls = 0
             attempts++
             pendingBox = Rect(box)
             pendingNode = null
@@ -641,10 +647,12 @@ class CheckboxService : AccessibilityService() {
         val tolerance = p.getInt("colourTol", 60).coerceIn(0, 200)
         val skipTop = p.getInt("skipTopPct", 20).coerceIn(0, 90)
 
-        // The pop-up has already had the after-a-tick wait to appear.
-        screen.findColour(colour, tolerance, skipTop) { box ->
+        // The pop-up has already had the after-a-tick wait to appear. Only a button-sized
+        // block counts: when a box will not tick there is no pop-up, and tapping the page's
+        // own purple text (a card's number, "Back") instead would change the page.
+        screen.findColour(colour, tolerance, skipTop, dp(32), dp(16)) { box ->
             if (box == null) {
-                status("pop-up: no ${String.format("#%06X", colour)} below the top $skipTop%")
+                status("pop-up: no ${String.format("#%06X", colour)} button below the top $skipTop%")
                 next()
             } else {
                 showMarkers(listOf(box))

@@ -29,7 +29,8 @@ object PageShift {
      *
      * Content that moved up by d rows makes after[y] look like before[y + d]. First the
      * simple case: if the screen is unchanged, the page did not move - which is what happens
-     * at the bottom, however much the rows look alike. Otherwise the shift that matches best
+     * at the bottom, however much the rows look alike - and so is a screen that matches
+     * itself as well as it matches any shift. Otherwise the shift that matches best
      * wins, and among near-equal matches the one closest to [expected] (the swipe's length),
      * which settles a list of identical rows where one step looks the same as the next.
      */
@@ -41,31 +42,53 @@ object PageShift {
         val limit = maxShift.coerceIn(0, rows / 2)
         val b = before.cells
         val a = after.cells
-        val fewest = cols * 4        // a shift is only judged on a fair amount of overlap
 
-        val errors = DoubleArray(limit + 1) { Double.MAX_VALUE }
+        // Every shift is judged on exactly the same cells of the after picture: the rows every
+        // shift can reach, less any cell that would meet one of our own windows (or the status
+        // bar) at some shift. Otherwise a change near the bottom, or a cell left out at one
+        // shift but not another, could make a wrong shift look better than not moving.
+        val window = rows - limit
+        val skipsAbove = IntArray((rows + 1) * cols)       // SKIP cells above each row, per column
+        for (y in 0 until rows) {
+            for (x in 0 until cols) {
+                skipsAbove[(y + 1) * cols + x] =
+                    skipsAbove[y * cols + x] + (if (b[y * cols + x] == SKIP) 1 else 0)
+            }
+        }
+        val use = BooleanArray(window * cols)
+        var used = 0
+        for (y in 0 until window) {
+            for (x in 0 until cols) {
+                val k = y * cols + x
+                val beforeSkips = skipsAbove[(y + limit + 1) * cols + x] - skipsAbove[y * cols + x]
+                if (a[k] != SKIP && beforeSkips == 0) {
+                    use[k] = true
+                    used++
+                }
+            }
+        }
+        if (used < cols * 4) return null        // too little left to judge by
+
+        val errors = DoubleArray(limit + 1)
         for (d in 0..limit) {
             var sum = 0L
-            var count = 0
-            for (y in 0 until rows - d) {
+            for (y in 0 until window) {
                 val ra = y * cols
                 val rb = (y + d) * cols
                 for (x in 0 until cols) {
-                    val va = a[ra + x]
-                    val vb = b[rb + x]
-                    if (va == SKIP || vb == SKIP) continue
-                    sum += abs(va - vb)
-                    count++
+                    if (use[ra + x]) sum += abs(a[ra + x] - b[rb + x])
                 }
             }
-            if (count >= fewest) errors[d] = sum.toDouble() / count
+            errors[d] = sum.toDouble() / used
         }
 
         if (errors[0] <= STILL) return 0
 
         val best = errors.minOrNull() ?: return null
-        if (best == Double.MAX_VALUE) return null
         val band = best * 1.1 + 0.5
+        // Not moving fits as well as anything: something small changed (a message, a glow at
+        // the edge) on a page that stayed put.
+        if (errors[0] <= band) return 0
         var choice = 0
         var choiceDistance = Int.MAX_VALUE
         for (d in 0..limit) {

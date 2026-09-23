@@ -144,9 +144,14 @@ object BoxFinder {
 
     /**
      * The biggest patch of one colour below [minY] - the coloured button in a pop-up.
-     * Returns null when no patch is big enough to be worth tapping.
+     * Only a solid block at least [minW] x [minH] counts: a page can use the same colour
+     * for its text (card numbers, a "Back" link), and a letter or a digit is never a button.
+     * Returns null when no patch is button-like, so nothing gets tapped.
      */
-    fun findColour(rgb: IntArray, w: Int, h: Int, target: Int, tol: Int, minY: Int): Rect? {
+    fun findColour(
+        rgb: IntArray, w: Int, h: Int, target: Int, tol: Int, minY: Int,
+        minW: Int = 1, minH: Int = 1
+    ): Rect? {
         val size = w * h
         if (size == 0) return null
 
@@ -195,7 +200,10 @@ object BoxFinder {
                 if (idx - w >= from && match[idx - w] && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
             }
 
-            if (count > bestCount && count >= 25) {
+            val bw = maxX - minX + 1
+            val bh = bottom - top + 1
+            val solid = count * 100 >= bw * bh * 45     // text fills far less of its outline
+            if (count > bestCount && count >= 25 && bw >= minW && bh >= minH && solid) {
                 bestCount = count
                 best = Rect(minX, top, maxX + 1, bottom + 1)
             }

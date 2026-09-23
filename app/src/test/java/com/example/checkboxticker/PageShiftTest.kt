@@ -104,6 +104,25 @@ class PageShiftTest {
     }
 
     @Test
+    fun `look-alike cards on a still page with a message popping up - not moved`() {
+        // Cards the same shape, about 1.5 swipes apart, only a little text different on each;
+        // between the two pictures a message appeared at the bottom of the screen.
+        val card = repeating(3000, 249)
+        val names = page(3000, 9)
+        for (y in 0 until 3000) if (y % 249 in 60..75) {
+            for (x in 5 until 20) card[y * cols + x] = names[y * cols + x]
+        }
+        for (from in listOf(380, 200)) {            // low on the screen, and higher up
+            val before = screen(card, 1400)
+            val after = screen(card, 1400)
+            for (y in from until from + 50) for (x in 0 until cols) {
+                if (after.cells[y * cols + x] != PageShift.SKIP) after.cells[y * cols + x] = 40
+            }
+            assertEquals("message at row $from", 0, measure(before, after))
+        }
+    }
+
+    @Test
     fun `pictures of different sizes cannot be compared`() {
         val p = page(2000, 8)
         val other = PageShift.Sketch(IntArray(cols * 10), cols, 10)

@@ -260,8 +260,18 @@ class ScreenService : Service() {
         }
     }
 
-    /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
-    fun findColour(target: Int, tolerance: Int, skipTopPct: Int, done: (Rect?) -> Unit) {
+    /**
+     * Finds the biggest solid block of one colour, at least [minW] x [minH] screen pixels,
+     * ignoring the top [skipTopPct] % of the screen.
+     */
+    fun findColour(
+        target: Int,
+        tolerance: Int,
+        skipTopPct: Int,
+        minW: Int,
+        minH: Int,
+        done: (Rect?) -> Unit
+    ) {
         worker.post {
             val box = try {
                 val frame = grab()
@@ -269,7 +279,10 @@ class ScreenService : Service() {
                     null
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
-                    BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
+                    BoxFinder.findColour(
+                        frame.rgb, frame.w, frame.h, target, tolerance, minY,
+                        minW / SCALE, minH / SCALE
+                    )
                         ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
                 }
             } catch (t: Throwable) {
