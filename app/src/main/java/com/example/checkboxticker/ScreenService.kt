@@ -234,7 +234,11 @@ class ScreenService : Service() {
                 for (x in left until right) cells[y * cols + x] = PageShift.SKIP
             }
         }
-        return PageShift.Sketch(cells, cols, rows)
+        return PageShift.Sketch(
+            cells, cols, rows,
+            pxPerCol = sw.toFloat() * CELL / frame.w,
+            pxPerRow = sh.toFloat() / rows
+        )
     }
 
     /** Sketch rows to screen pixels, and back. */

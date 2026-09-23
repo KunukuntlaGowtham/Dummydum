@@ -60,6 +60,9 @@ class CheckboxService : AccessibilityService() {
 
     private var attempts = 0                      // which box this is, counting the whole run
     private val failed = ArrayList<Int>()         // their places once earlier failures are out
+    private val failedBoxes = ArrayList<Int>()    // the same failures, as boxes of the run
+    private val triedLooks = ArrayList<BoxLook.Look>()  // what the last boxes tried look like
+    private var pendingLook: BoxLook.Look? = null  // what the box waiting to be judged looks like
     private val tried = ArrayList<Rect>()         // boxes already had a go, moved with the page
     private var pendingBox: Rect? = null          // the box waiting to be judged
     private var pendingNode: AccessibilityNodeInfo? = null
@@ -183,7 +186,10 @@ class CheckboxService : AccessibilityService() {
         updateBubble()
         attempts = 0
         failed.clear()
+        failedBoxes.clear()
         tried.clear()
+        triedLooks.clear()
+        pendingLook = null
         pendingBox = null
         pendingNode = null
         pendingBefore = null
@@ -242,11 +248,13 @@ class CheckboxService : AccessibilityService() {
             // First move the tried boxes by how far the page really went, so both the verdict
             // on the last box and the choice of the next one see them in the right place.
             applyScroll(screen, sketch)
-            settleUp(boxes)
+            val looks = if (sketch == null) null else boxes.map { lookOf(sketch, it) }
+            settleUp(boxes, looks)
 
-            val box = boxes.firstOrNull { found ->
-                !hitsBubble(found) && tried.none { Rect.intersects(it, found) }
+            val index = boxes.indices.firstOrNull { i ->
+                !hitsBubble(boxes[i]) && !alreadyTried(boxes[i], looks?.get(i))
             }
+            val box = index?.let { boxes[it] }
             if (box == null) {
                 // Nothing untried left, and the last scroll went nowhere: the page is done.
                 // Three scrolls in a row with nothing new also means the end, whatever the
@@ -269,6 +277,12 @@ class CheckboxService : AccessibilityService() {
             pendingBefore = null
             pendingNumber = attempts
             tried.add(Rect(box))
+            val look = if (index != null) looks?.get(index) else null
+            pendingLook = look
+            if (look != null) {
+                triedLooks.add(look)
+                if (triedLooks.size > 20) triedLooks.removeAt(0)
+            }
 
             val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
             if (ok) ticked++
@@ -319,19 +333,23 @@ class CheckboxService : AccessibilityService() {
      * has failed when an empty box is still sitting where it was. Nothing waits on the answer:
      * it falls out of the look this pass was taking anyway.
      */
-    private fun settleUp(boxes: List<Rect>?) {
+    private fun settleUp(boxes: List<Rect>?, looks: List<BoxLook.Look>? = null) {
         val node = pendingNode
         val before = pendingBefore
         val box = pendingBox
+        val look = pendingLook
         val number = pendingNumber
         pendingNode = null
         pendingBefore = null
         pendingBox = null
+        pendingLook = null
         pendingNumber = 0
         if (number <= 0) return
 
         val itFailed = when {
             node != null && before != null -> !stateChanged(node, before)
+            // Still on screen, still empty, next to the same words: it did not tick.
+            look != null && looks != null -> looks.any { BoxLook.same(look, it) }
             box != null && boxes != null -> boxes.any { Rect.intersects(it, box) }
             else -> false
         }
@@ -345,6 +363,7 @@ class CheckboxService : AccessibilityService() {
     private fun recordFailure(number: Int) {
         val shown = number - failed.size
         failed.add(shown)
+        failedBoxes.add(number)
         try {
             openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
                 it.write("box $number of the run, shown as $shown\n".toByteArray())
@@ -453,7 +472,8 @@ class CheckboxService : AccessibilityService() {
         val tally = if (failed.isEmpty()) {
             "none failed"
         } else {
-            "failed ${failed.size}: " + failed.joinToString(", ")
+            "failed ${failed.size}: " + failed.joinToString(", ") +
+                    "\n(boxes " + failedBoxes.joinToString(", ") + " of the run)"
         }
         view.text = "$lastStatus\n$tally"
     }
@@ -500,6 +520,26 @@ class CheckboxService : AccessibilityService() {
         try { windowManager?.removeView(view) } catch (e: Exception) { }
         panel = null
     }
+
+    /**
+     * A box together with what is written beside it: from just left of the box, 300 dp
+     * across and about 110 dp down - on a form, the name, date of birth, age and number.
+     */
+    private fun lookOf(sketch: PageShift.Sketch, box: Rect): BoxLook.Look =
+        BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), box.height() + dp(114))
+
+    /**
+     * Has this box had its go already? Recognised by how it and its words look, so the answer
+     * does not depend on how far the page scrolled - at the bottom of a page, where a swipe
+     * only makes the page bounce, the box that would not tick is still known for what it is.
+     * Without a picture, only where the tried boxes should be is known.
+     */
+    private fun alreadyTried(box: Rect, look: BoxLook.Look?): Boolean =
+        if (look != null && triedLooks.isNotEmpty()) {
+            triedLooks.any { BoxLook.same(it, look) }
+        } else {
+            tried.any { Rect.intersects(it, box) }
+        }
 
     /** Where our own windows are on screen, left out when the page's movement is measured. */
     private fun ownWindows(): List<Rect> = listOfNotNull(bounds(bubble), bounds(panel))

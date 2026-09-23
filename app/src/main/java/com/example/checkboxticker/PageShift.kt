@@ -20,8 +20,15 @@ object PageShift {
     /**
      * A small grey copy of the screen: [rows] rows of [cols] cells, each the brightness of a
      * short run of pixels. Cells under the floating button or the status panel hold [SKIP].
+     * [pxPerCol] and [pxPerRow] are how many screen pixels one cell covers.
      */
-    class Sketch(val cells: IntArray, val cols: Int, val rows: Int)
+    class Sketch(
+        val cells: IntArray,
+        val cols: Int,
+        val rows: Int,
+        val pxPerCol: Float = 1f,
+        val pxPerRow: Float = 1f
+    )
 
     /**
      * Compares the sketches from just before and just after the scroll, and returns how many
