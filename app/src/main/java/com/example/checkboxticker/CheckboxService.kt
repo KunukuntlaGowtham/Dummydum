@@ -58,9 +58,8 @@ class CheckboxService : AccessibilityService() {
     private var panel: TextView? = null
     private var lastStatus = ""
 
-    private var attempts = 0                      // which box this is, counting the whole run
-    private val failed = ArrayList<Int>()         // their places once earlier failures are out
-    private val tried = ArrayList<Rect>()         // boxes already had a go, moved with the page
+    private var attempts = 0                      // boxes numbered so far in the run
+    private val failed = ArrayList<Int>()         // the numbers of boxes that did not tick
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -162,31 +161,36 @@ class CheckboxService : AccessibilityService() {
     }
 
     /**
-     * Works down the page a screen at a time until STOP: tick the boxes on screen from the
-     * top; if one will not tick, do the rest of that screen from the bottom up to it; then
-     * scroll the next few boxes into view and go again.
+     * Works down the page a snap at a time until STOP:
+     *
+     * 1. Snap the screen and find every empty checkbox on it; number them top to bottom,
+     *    carrying on from the last screen.
+     * 2. Tick each one and clear its pop-up - as many times as there are boxes.
+     * 3. Snap again: a box still empty where it was did not tick - its number is shown.
+     * 4. Scroll so the next boxes come up, and do it all again.
      */
     fun startLoop() {
         if (looping) return
+        if (ScreenService.instance == null) {
+            toast("Turn on screen reading in the app first")
+            return
+        }
         looping = true
         running = true
         silentRun = false
         ticked = 0
         lastBox = null
-        updateBubble()
         attempts = 0
         failed.clear()
-        tried.clear()
-        triedNodes.clear()
-        screenSet.clear()
-        screenFailed.clear()
-        numbered = 0
-        emptyScreens = 0
+        onScreen.clear()
+        oldLooks.clear()
+        emptySnaps = 0
         scrolledOnce = false
-        lastEmpty = emptyList()
+        moveBubbleAside()
+        updateBubble()
         toast("Running - press STOP to finish")
         status("Started")
-        step()
+        snap()
     }
 
     fun stopLoop(why: String) {
@@ -195,194 +199,97 @@ class CheckboxService : AccessibilityService() {
         running = false
         lastBox = null
         updateBubble()
-        status("$why - tried $attempts, ticked $ticked")
-        toast("$why after $ticked")
+        status("$why - numbered $attempts, ticked ${attempts - failed.size}")
+        toast("$why after $attempts boxes")
     }
 
-    // ---------------------------------------------------------------- a screen at a time
+    // ---------------------------------------------------------------- a snap at a time
 
-    /** One checkbox of the screen being worked on - from the tree, or found by sight. */
-    private class Item(val node: AccessibilityNodeInfo?, val box: Rect?, val top: Int, val bottom: Int)
+    /** A checkbox of the current snap: its number, where it is, and what it looks like. */
+    private class Numbered(val number: Int, val box: Rect, val look: BoxLook.Look?)
 
-    private val screenSet = ArrayList<Item>()     // the boxes on this screen, top to bottom
-    private val screenFailed = ArrayList<Int>()   // their places in screenSet that would not tick
-    private val triedNodes = ArrayList<AccessibilityNodeInfo>()  // tree checkboxes had a go
-    private var nextTop = 0                       // next place to try, going down
-    private var nextBottom = 0                    // next place to try, going up
-    private var goingUp = false                   // one failed: the rest from the bottom up
-    private var tappedBefore: Boolean? = null     // the tree checkbox's state before its tap
-    private var numbered = 0                      // boxes of the run numbered so far
-    private var emptyScreens = 0                  // scrolls in a row with nothing new
+    private val onScreen = ArrayList<Numbered>()        // this snap's boxes, top to bottom
+    private val oldLooks = ArrayList<BoxLook.Look>()    // boxes that did not tick, to know again
+    private var emptySnaps = 0                          // snaps in a row with nothing new
     private var scrolledOnce = false
-    private var lastEmpty: List<Rect> = emptyList()  // by sight: boxes left empty before a scroll
-    private var treeKnown = false                 // the tree has checkboxes, all had a go
 
-    /** Looks at the screen and starts on the boxes there that have not had a go yet. */
-    private fun step() {
+    /** Step 1: snap, find the boxes, number the new ones. */
+    private fun snap() {
         if (!looping) return
-        val p = prefs()
-
-        val nodes = treeSet(p)
-        if (nodes.isNotEmpty()) {
-            startScreen(nodes.map { node ->
-                val r = boundsOf(node)
-                Item(node, null, r.top, r.bottom)
-            }, p)
-            return
-        }
-        if (treeKnown) {
-            nothingNew(p)
-            return
-        }
-
         val screen = ScreenService.instance
-        if (!p.getBoolean("pixels", true) || screen == null) {
-            nothingNew(p)
+        if (screen == null) {
+            stopLoop("Screen reading stopped")
             return
         }
-        screen.findBoxes(dp(14), dp(48)) { boxes ->
-            if (!looping) return@findBoxes
-            val empty = boxes.filter { !hitsBubble(it) }
-            // At the bottom the page cannot move: the boxes left empty are exactly where
-            // they were before the scroll.
-            if (scrolledOnce && empty.isNotEmpty() && samePlaces(empty, lastEmpty)) {
-                stopLoop("Reached the end of the page")
-                return@findBoxes
+        status("snap")
+        screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
+            if (!looping) return@findBoxesWithSketch
+            val found = boxes.filter { !hitsBubble(it) }.sortedBy { it.top }
+            onScreen.clear()
+            for (box in found) {
+                val look = sketch?.let { lookOf(it, box) }
+                // A box that did not tick stays empty, and may still be on screen after the
+                // scroll: it is known by what is written beside it, and not numbered again.
+                if (look != null && oldLooks.any { BoxLook.same(it, look) }) continue
+                attempts++
+                onScreen.add(Numbered(attempts, Rect(box), look))
             }
-            val fresh = empty.filter { found -> tried.none { Rect.intersects(it, found) } }
-            if (fresh.isEmpty()) {
-                nothingNew(p)
-                return@findBoxes
+            if (onScreen.isEmpty()) {
+                nothingNew()
+                return@findBoxesWithSketch
             }
-            startScreen(fresh.sortedBy { it.top }.map { Item(null, Rect(it), it.top, it.bottom) }, p)
+            emptySnaps = 0
+            status("boxes ${onScreen.first().number} to ${onScreen.last().number} on this screen")
+            tickNext(0)
         }
     }
 
-    /** The tree's unticked checkboxes on screen that have not had a go, top to bottom. */
-    private fun treeSet(p: SharedPreferences): List<AccessibilityNodeInfo> {
-        val rules = Rules(
-            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
-            switches = p.getBoolean("switches", true),
-            radios = p.getBoolean("radios", false),
-            loose = p.getBoolean("loose", true)
-        )
-        val targets = ArrayList<AccessibilityNodeInfo>()
-        for (root in roots()) {
-            collect(root, targets, rules, 200)
-            if (targets.isNotEmpty()) break
-        }
-        treeKnown = targets.isNotEmpty()
-        return targets
-            .filter { found -> triedNodes.none { it == found } }
-            .sortedBy { boundsOf(it).top }
-    }
-
-    private fun boundsOf(node: AccessibilityNodeInfo): Rect {
-        val r = Rect()
-        node.getBoundsInScreen(r)
-        return r
-    }
-
-    private fun startScreen(items: List<Item>, p: SharedPreferences) {
-        emptyScreens = 0
-        screenSet.clear()
-        screenSet.addAll(items)
-        screenFailed.clear()
-        nextTop = 0
-        nextBottom = items.size - 1
-        goingUp = false
-        status("${items.size} on this screen")
-        tapNext(p)
-    }
-
-    /** Taps the next box of this screen: down from the top, or up from the bottom. */
-    private fun tapNext(p: SharedPreferences) {
+    /** Step 2: tick each box of the snap and clear its pop-up, one after another. */
+    private fun tickNext(i: Int) {
         if (!looping) return
-        val place = if (goingUp) nextBottom else nextTop
-        if (place < nextTop || place >= screenSet.size) {
-            finishScreen(p)
+        if (i >= onScreen.size) {
+            checkSnap()
             return
         }
-        val item = screenSet[place]
-        attempts++
-        var ok: Boolean
-        val node = item.node
-        if (node != null) {
-            triedNodes.add(node)
-            tappedBefore = if (node.isCheckable) node.isChecked else null
-            ok = clickNode(node)
-            if (!ok) ok = gestureTap(node)
-        } else {
-            val box = item.box ?: Rect()
-            tried.add(Rect(box))
-            ok = gestureTap(box.exactCenterX(), box.exactCenterY())
-        }
+        val item = onScreen[i]
+        val ok = gestureTap(item.box.exactCenterX(), item.box.exactCenterY())
         if (ok) ticked++
-        val where = if (goingUp) "from the bottom" else "from the top"
-        status("box ${numbered + place + 1}: tapped $where" + (if (ok) "" else " - refused"))
+        status("box ${item.number}: tapped" + (if (ok) "" else " - refused"))
+        val p = prefs()
         main.postDelayed({
-            if (looping) afterTick { if (looping) judge(place, p) }
+            if (looping) afterTick { tickNext(i + 1) }
         }, waitMs(p, "tickWaitMs", 300))
     }
 
-    /**
-     * Did the box just tapped tick? A tree checkbox says so itself; one found by sight has
-     * failed when an empty box is still where it was (the page has not moved since).
-     */
-    private fun judge(place: Int, p: SharedPreferences) {
-        val item = screenSet[place]
-        val node = item.node
-        if (node != null) {
-            val before = tappedBefore
-            settle(place, before != null && !stateChanged(node, before), p)
-            return
-        }
-        val box = item.box
+    /** Step 3: snap again - a box still empty where it was did not tick. */
+    private fun checkSnap() {
         val screen = ScreenService.instance
-        if (box == null || screen == null) {
-            settle(place, false, p)
+        if (screen == null) {
+            stopLoop("Screen reading stopped")
             return
         }
+        status("checking")
         screen.findBoxes(dp(14), dp(48)) { boxes ->
-            if (looping) settle(place, boxes.any { Rect.intersects(it, box) }, p)
+            if (!looping) return@findBoxes
+            for (item in onScreen) {
+                if (boxes.any { Rect.intersects(it, item.box) }) {
+                    noteNotTicked(item.number)
+                    item.look?.let {
+                        oldLooks.add(it)
+                        if (oldLooks.size > 30) oldLooks.removeAt(0)
+                    }
+                }
+            }
+            scrollOn()
         }
     }
 
-    private fun settle(place: Int, itFailed: Boolean, p: SharedPreferences) {
-        if (!looping) return
-        if (itFailed) screenFailed.add(place)
-        if (goingUp) {
-            nextBottom = place - 1
-        } else {
-            nextTop = place + 1
-            // One would not tick: the rest of this screen goes from the bottom up to it.
-            if (itFailed && nextTop < screenSet.size) goingUp = true
-        }
-        tapNext(p)
-    }
-
-    /** This screen is done: number its failures in page order, then bring on the next few. */
-    private fun finishScreen(p: SharedPreferences) {
-        for (place in screenFailed.sorted()) recordFailure(numbered + place + 1)
-        numbered += screenSet.size
-        lastEmpty = screenFailed.mapNotNull { screenSet[it].box?.let { b -> Rect(b) } }
-        val lowest = screenSet.maxOf { it.bottom }
-        val h = resources.displayMetrics.heightPixels
-        // Bring the last box up near the top, so the ones below it come into view.
-        val distance = (lowest - h / 5).coerceIn(dp(40), h * 3 / 5)
-        scrollBy(distance, p)
-    }
-
-    /**
-     * Writes down a box that would not tick. It is shown by its place once the earlier
-     * failures are taken out of the list: boxes 5, 7 and 10 failing read as 5, 6 and 8.
-     */
-    private fun recordFailure(number: Int) {
-        val shown = number - failed.size
-        failed.add(shown)
+    /** Writes down a box that did not tick and shows its number. */
+    private fun noteNotTicked(number: Int) {
+        failed.add(number)
         try {
             openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
-                it.write("box $number of the run, shown as $shown\n".toByteArray())
+                it.write("box $number not ticked\n".toByteArray())
             }
         } catch (e: Exception) {
             android.util.Log.e("CheckboxTicker", "could not write the failure", e)
@@ -390,34 +297,40 @@ class CheckboxService : AccessibilityService() {
         updatePanel()
     }
 
-    /** Nothing new on screen. Twice in a row after scrolling means the end of the page. */
-    private fun nothingNew(p: SharedPreferences) {
-        emptyScreens++
-        if (scrolledOnce && emptyScreens >= 2) {
+    /** Step 4: bring the boxes below this snap's last one up to the top of the screen. */
+    private fun scrollOn() {
+        if (!looping) return
+        val lowest = onScreen.maxOf { it.box.bottom }
+        val h = resources.displayMetrics.heightPixels
+        val distance = (lowest + dp(16) - dp(72)).coerceIn(dp(48), h * 7 / 10)
+        scrollBy(distance)
+    }
+
+    /** No new box on this snap. Three in a row after scrolling means the end of the page. */
+    private fun nothingNew() {
+        emptySnaps++
+        if (scrolledOnce && emptySnaps >= 3) {
             stopLoop("Reached the end of the page")
             return
         }
         status("nothing new here - scrolling on")
-        scrollBy(resources.displayMetrics.heightPixels * 2 / 5, p)
+        scrollBy(resources.displayMetrics.heightPixels / 2)
     }
 
-    private fun scrollBy(distance: Int, p: SharedPreferences) {
+    private fun scrollBy(distance: Int) {
         if (!looping) return
-        status("scrolling to the next boxes")
-        val moved = swipeUp(distance)
-        // Boxes found by sight that were tried travel up with the page.
-        for (rect in tried) rect.offset(0, -moved)
-        tried.removeAll { it.bottom <= 0 }
+        status("scrolling")
+        swipeUp(distance)
         scrolledOnce = true
         lastBox = null
-        main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300) + 300L)
+        main.postDelayed({ snap() }, waitMs(prefs(), "scrollWaitMs", 300) + 400L)
     }
 
     /**
      * Moves the page up by [distance] pixels: a steady drag, then the finger held still for a
      * moment before it lifts, so the page does not fling on past boxes nobody has seen.
      */
-    private fun swipeUp(distance: Int): Int {
+    private fun swipeUp(distance: Int) {
         val metrics = resources.displayMetrics
         val x = metrics.widthPixels / 2f
         val from = metrics.heightPixels * 0.85f
@@ -445,18 +358,42 @@ class CheckboxService : AccessibilityService() {
         } catch (e: Exception) {
             android.util.Log.e("CheckboxTicker", "scroll failed", e)
         }
-        return (from - to).toInt()
     }
 
-    /** The same boxes in the same places, give or take a few pixels. */
-    private fun samePlaces(now: List<Rect>, before: List<Rect>): Boolean {
-        if (now.size != before.size) return false
-        val slack = dp(16)
-        return now.all { a ->
-            before.any { b ->
-                kotlin.math.abs(a.centerX() - b.centerX()) <= slack &&
-                        kotlin.math.abs(a.centerY() - b.centerY()) <= slack
-            }
+    /**
+     * A box together with what is written beside it: from just left of the box, 300 dp across
+     * and 140 dp down - on a form, the name, date of birth, age and number.
+     */
+    private fun lookOf(sketch: BoxLook.Sketch, box: Rect): BoxLook.Look =
+        BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), dp(140))
+
+    /** Where our own windows are, left out of the snap's copy of the screen. */
+    private fun ownWindows(): List<Rect> = listOfNotNull(boundsOfView(bubble), boundsOfView(panel))
+
+    private fun boundsOfView(candidate: View?): Rect? {
+        val view = candidate ?: return null
+        if (view.width <= 0 || view.height <= 0) return null
+        val where = IntArray(2)
+        view.getLocationOnScreen(where)
+        val pad = dp(8)
+        return Rect(where[0] - pad, where[1] - pad, where[0] + view.width + pad, where[1] + view.height + pad)
+    }
+
+    /**
+     * Checkboxes sit down the left of a form, and a box under the START/STOP button is never
+     * tapped - so for a run the button moves to the right-hand edge.
+     */
+    private fun moveBubbleAside() {
+        val view = bubble ?: return
+        val params = bubbleParams ?: return
+        val w = resources.displayMetrics.widthPixels
+        val width = if (view.width > 0) view.width else dp(90)
+        if (params.x + width / 2 >= w / 2) return
+        params.x = w - width - dp(4)
+        try {
+            windowManager?.updateViewLayout(view, params)
+        } catch (e: Exception) {
+            // gone already
         }
     }
 
@@ -480,9 +417,9 @@ class CheckboxService : AccessibilityService() {
         }
         val view = ensurePanel() ?: return
         val tally = if (failed.isEmpty()) {
-            "none failed"
+            "all ticked so far"
         } else {
-            "failed ${failed.size}: " + failed.joinToString(", ")
+            "not ticked: " + failed.joinToString(", ")
         }
         view.text = "$lastStatus\n$tally"
     }

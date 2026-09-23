@@ -34,6 +34,7 @@ class ScreenService : Service() {
         const val TAG = "CheckboxTicker"
         const val CHANNEL = "ticker"
         const val SCALE = 2          // work on a half-size copy of the screen
+        const val CELL = 4           // pixels per cell across, in a sketch
 
         @Volatile
         var instance: ScreenService? = null
@@ -166,6 +167,73 @@ class ScreenService : Service() {
         }
     }
 
+    /**
+     * One snap, two answers: the empty boxes on it (in screen coordinates), and a small grey
+     * copy of the screen to recognise them by later, with our own windows ([skip], in screen
+     * pixels) left out.
+     */
+    fun findBoxesWithSketch(
+        minScreenPx: Int,
+        maxScreenPx: Int,
+        skip: List<Rect>,
+        done: (List<Rect>, BoxLook.Sketch?) -> Unit
+    ) {
+        worker.post {
+            var boxes: List<Rect> = emptyList()
+            var sketch: BoxLook.Sketch? = null
+            try {
+                val frame = grab()
+                if (frame != null) {
+                    boxes = detectIn(frame, minScreenPx / SCALE, maxScreenPx / SCALE)
+                    sketch = sketchOf(frame, skip)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "screen scan failed", t)
+            }
+            main.post { done(boxes, sketch) }
+        }
+    }
+
+    /**
+     * Every row of the screen, each cell the average brightness of [CELL] pixels side by
+     * side. Our own windows - whose text changes from one snap to the next - are marked
+     * [BoxLook.SKIP].
+     */
+    private fun sketchOf(frame: Frame, skip: List<Rect>): BoxLook.Sketch {
+        val cols = frame.w / CELL
+        val rows = frame.h
+        val cells = IntArray(cols * rows)
+        for (y in 0 until rows) {
+            val row = y * frame.w
+            for (cx in 0 until cols) {
+                var sum = 0
+                val x0 = cx * CELL
+                for (x in x0 until x0 + CELL) {
+                    val c = frame.rgb[row + x]
+                    sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
+                            (c and 0xff) * 114) / 1000
+                }
+                cells[y * cols + cx] = sum / CELL
+            }
+        }
+        val sw = if (screenW > 0) screenW else frame.w * SCALE
+        val sh = if (screenH > 0) screenH else frame.h * SCALE
+        for (r in skip) {
+            val left = (r.left.toLong() * frame.w / sw / CELL).toInt().coerceIn(0, cols)
+            val right = ((r.right.toLong() * frame.w / sw + CELL - 1) / CELL).toInt().coerceIn(0, cols)
+            val top = (r.top.toLong() * rows / sh).toInt().coerceIn(0, rows)
+            val bottom = (r.bottom.toLong() * rows / sh + 1).toInt().coerceIn(0, rows)
+            for (y in top until bottom) {
+                for (x in left until right) cells[y * cols + x] = BoxLook.SKIP
+            }
+        }
+        return BoxLook.Sketch(
+            cells, cols, rows,
+            pxPerCol = sw.toFloat() * CELL / frame.w,
+            pxPerRow = sh.toFloat() / rows
+        )
+    }
+
     /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
     fun findColour(target: Int, tolerance: Int, skipTopPct: Int, done: (Rect?) -> Unit) {
         worker.post {
@@ -188,18 +256,27 @@ class ScreenService : Service() {
 
     private class Frame(val rgb: IntArray, val w: Int, val h: Int)
 
+    /** The last picture taken - still the screen, until Android sends a new one. */
+    @Volatile
+    private var lastFrame: Frame? = null
+
     /** One frame of the screen as plain colours. */
     private fun grab(): Frame? {
         val imageReader = reader ?: return null
 
         var image = imageReader.acquireLatestImage()
         var tries = 0
-        while (image == null && tries < 12) {
-            Thread.sleep(40)
+        val known = lastFrame
+        val limit = if (known == null) 12 else 3
+        val pause = if (known == null) 40L else 15L
+        while (image == null && tries < limit) {
+            Thread.sleep(pause)
             image = imageReader.acquireLatestImage()
             tries++
         }
-        if (image == null) return null
+        // Android sends a new picture only when something on screen changes, so no new one
+        // means the last picture is still what is on screen.
+        if (image == null) return known
 
         try {
             val plane = image.planes[0]
@@ -224,7 +301,9 @@ class ScreenService : Service() {
                     i += pixelStride
                 }
             }
-            return Frame(rgb, w, h)
+            val frame = Frame(rgb, w, h)
+            lastFrame = frame
+            return frame
         } finally {
             image.close()
         }
@@ -232,6 +311,10 @@ class ScreenService : Service() {
 
     private fun detect(minPx: Int, maxPx: Int): List<Rect> {
         val frame = grab() ?: return emptyList()
+        return detectIn(frame, minPx, maxPx)
+    }
+
+    private fun detectIn(frame: Frame, minPx: Int, maxPx: Int): List<Rect> {
         val lum = IntArray(frame.rgb.size)
         for (k in frame.rgb.indices) {
             val c = frame.rgb[k]

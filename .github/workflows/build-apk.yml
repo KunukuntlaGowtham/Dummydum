@@ -19,6 +19,9 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Test the checkbox recognition
+        run: gradle testDebugUnitTest --no-daemon
+
       - name: Build APK
         run: gradle assembleDebug --no-daemon
 
