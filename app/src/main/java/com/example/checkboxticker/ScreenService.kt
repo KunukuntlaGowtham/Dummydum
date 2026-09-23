@@ -49,6 +49,10 @@ class ScreenService : Service() {
     private var screenW = 0
     private var screenH = 0
 
+    /** The last picture taken. With nothing moving on screen Android sends no new one. */
+    @Volatile
+    private var lastFrame: Frame? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -194,12 +198,18 @@ class ScreenService : Service() {
 
         var image = imageReader.acquireLatestImage()
         var tries = 0
-        while (image == null && tries < 12) {
-            Thread.sleep(40)
+        val known = lastFrame
+        val limit = if (known == null) 12 else 3
+        val pause = if (known == null) 40L else 15L
+        while (image == null && tries < limit) {
+            Thread.sleep(pause)
             image = imageReader.acquireLatestImage()
             tries++
         }
-        if (image == null) return null
+        // No new picture means nothing on screen changed, so the last one is still the
+        // screen. Returning nothing instead would make the second capture after a press that
+        // changed nothing - a box that stayed unchecked - find no box, and call it checked.
+        if (image == null) return known
 
         try {
             val plane = image.planes[0]
@@ -224,7 +234,9 @@ class ScreenService : Service() {
                     i += pixelStride
                 }
             }
-            return Frame(rgb, w, h)
+            val frame = Frame(rgb, w, h)
+            lastFrame = frame
+            return frame
         } finally {
             image.close()
         }
