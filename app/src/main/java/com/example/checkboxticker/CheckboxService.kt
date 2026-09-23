@@ -182,6 +182,7 @@ class CheckboxService : AccessibilityService() {
         lastBox = null
         attempts = 0
         failed.clear()
+        showNumbers()
         onScreen.clear()
         oldLooks.clear()
         emptySnaps = 0
@@ -225,8 +226,10 @@ class CheckboxService : AccessibilityService() {
         screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
             if (!looping) return@findBoxesWithSketch
             val found = boxes.filter { !hitsBubble(it) }.sortedBy { it.top }
+            val limit = maxBoxes()
             onScreen.clear()
             for (box in found) {
+                if (attempts >= limit) break
                 val look = sketch?.let { lookOf(it, box) }
                 // A box that did not tick stays empty, and may still be on screen after the
                 // scroll: it is known by what is written beside it, and not numbered again.
@@ -235,7 +238,11 @@ class CheckboxService : AccessibilityService() {
                 onScreen.add(Numbered(attempts, Rect(box), look))
             }
             if (onScreen.isEmpty()) {
-                nothingNew()
+                if (attempts >= limit) {
+                    stopLoop("Stopped after $limit boxes")
+                } else {
+                    nothingNew()
+                }
                 return@findBoxesWithSketch
             }
             emptySnaps = 0
@@ -280,9 +287,20 @@ class CheckboxService : AccessibilityService() {
                     }
                 }
             }
-            scrollOn()
+            val limit = maxBoxes()
+            if (attempts >= limit) stopLoop("Stopped after $limit boxes") else scrollOn()
         }
     }
+
+    /** A run numbers at most this many boxes, then stops. */
+    private fun maxBoxes() = prefs().getInt("maxBoxes", 15).coerceAtLeast(1)
+
+    /**
+     * The failed boxes as they are shown: each number less the failures before it, with the
+     * sum beside it - boxes 4, 5 and 9 failing read "4(4-0), 4(5-1), 7(9-2)".
+     */
+    private fun failedText(): String =
+        failed.mapIndexed { i, n -> "${n - i}($n-$i)" }.joinToString(", ")
 
     /** Writes down a box that did not tick and shows its number. */
     private fun noteNotTicked(number: Int) {
@@ -295,6 +313,7 @@ class CheckboxService : AccessibilityService() {
             android.util.Log.e("CheckboxTicker", "could not write the failure", e)
         }
         updatePanel()
+        showNumbers()
     }
 
     /** Step 4: bring the boxes below this snap's last one up to the top of the screen. */
@@ -368,7 +387,8 @@ class CheckboxService : AccessibilityService() {
         BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), dp(140))
 
     /** Where our own windows are, left out of the snap's copy of the screen. */
-    private fun ownWindows(): List<Rect> = listOfNotNull(boundsOfView(bubble), boundsOfView(panel))
+    private fun ownWindows(): List<Rect> =
+        listOfNotNull(boundsOfView(bubble), boundsOfView(panel), boundsOfView(numbersView))
 
     private fun boundsOfView(candidate: View?): Rect? {
         val view = candidate ?: return null
@@ -395,6 +415,89 @@ class CheckboxService : AccessibilityService() {
         } catch (e: Exception) {
             // gone already
         }
+        positionNumbers()
+    }
+
+    // ---------------------------------------------------------------- numbers beside the button
+
+    private var numbersView: TextView? = null
+    private var numbersParams: WindowManager.LayoutParams? = null
+
+    /**
+     * The numbers of the boxes that did not tick, in a label right beside the START/STOP
+     * button where they are easy to see. It stays after the run, until the next START.
+     */
+    private fun showNumbers() {
+        if (failed.isEmpty()) {
+            hideNumbers()
+            return
+        }
+        val manager = windowManager ?: return
+        val text = "Not ticked: " + failedText()
+        numbersView?.let {
+            it.text = text
+            positionNumbers()
+            return
+        }
+        val view = TextView(this).apply {
+            this.text = text
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxWidth = resources.displayMetrics.widthPixels * 3 / 5
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.argb(215, 150, 20, 20))
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        try {
+            manager.addView(view, params)
+            numbersView = view
+            numbersParams = params
+            positionNumbers()
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "numbers label failed", e)
+        }
+    }
+
+    /** Puts the label on whichever side of the button has room: left of it at the right edge. */
+    private fun positionNumbers() {
+        val view = numbersView ?: return
+        val params = numbersParams ?: return
+        val b = bubbleParams ?: return
+        val w = resources.displayMetrics.widthPixels
+        val bubbleWidth = bubble?.width?.takeIf { it > 0 } ?: dp(90)
+        if (b.x + bubbleWidth / 2 >= w / 2) {
+            params.gravity = Gravity.TOP or Gravity.END
+            params.x = w - b.x + dp(6)
+        } else {
+            params.gravity = Gravity.TOP or Gravity.START
+            params.x = b.x + bubbleWidth + dp(6)
+        }
+        params.y = b.y
+        try {
+            windowManager?.updateViewLayout(view, params)
+        } catch (e: Exception) {
+            // gone already
+        }
+    }
+
+    private fun hideNumbers() {
+        val view = numbersView ?: return
+        try { windowManager?.removeView(view) } catch (e: Exception) { }
+        numbersView = null
+        numbersParams = null
     }
 
     private fun waitMs(p: SharedPreferences, key: String, fallback: Int) =
@@ -419,7 +522,7 @@ class CheckboxService : AccessibilityService() {
         val tally = if (failed.isEmpty()) {
             "all ticked so far"
         } else {
-            "not ticked: " + failed.joinToString(", ")
+            "not ticked: " + failedText()
         }
         view.text = "$lastStatus\n$tally"
     }
@@ -986,6 +1089,7 @@ class CheckboxService : AccessibilityService() {
                         params.y = startY + dy.toInt()
                         try {
                             manager.updateViewLayout(view, params)
+                            positionNumbers()
                         } catch (e: Exception) {
                             // view already gone
                         }
@@ -1025,6 +1129,7 @@ class CheckboxService : AccessibilityService() {
         }
         bubble = null
         bubbleParams = null
+        hideNumbers()
     }
 
     private fun updateBubble() {
