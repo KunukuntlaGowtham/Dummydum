@@ -296,11 +296,11 @@ class CheckboxService : AccessibilityService() {
     private fun maxBoxes() = prefs().getInt("maxBoxes", 15).coerceAtLeast(1)
 
     /**
-     * The failed boxes as they are shown: each number less the failures before it, with the
-     * sum beside it - boxes 4, 5 and 9 failing read "4(4-0), 4(5-1), 7(9-2)".
+     * The failed boxes as they are shown: each number less the failures before it - boxes 4,
+     * 5 and 9 failing read "4, 4, 7".
      */
     private fun failedText(): String =
-        failed.mapIndexed { i, n -> "${n - i}($n-$i)" }.joinToString(", ")
+        failed.mapIndexed { i, n -> n - i }.joinToString(", ")
 
     /** Writes down a box that did not tick and shows its number. */
     private fun noteNotTicked(number: Int) {

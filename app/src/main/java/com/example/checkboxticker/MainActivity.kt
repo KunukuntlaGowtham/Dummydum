@@ -42,7 +42,6 @@ class MainActivity : Activity() {
     private lateinit var tickWaitInput: EditText
     private lateinit var clearWaitInput: EditText
     private lateinit var scrollWaitInput: EditText
-    private lateinit var scrollMmInput: EditText
     private lateinit var skipTopInput: EditText
     private lateinit var gapInput: EditText
     private lateinit var maxInput: EditText
@@ -146,9 +145,6 @@ class MainActivity : Activity() {
         scrollWaitInput = number(p.getInt("scrollWaitMs", 300))
         root.addView(scrollWaitInput)
 
-        root.addView(label("Scroll each time (mm)"))
-        scrollMmInput = number(p.getInt("scrollMm", 20))
-        root.addView(scrollMmInput)
 
         root.addView(button("2. Save settings") {
             save()
@@ -224,7 +220,6 @@ class MainActivity : Activity() {
             .putInt("tickWaitMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
             .putInt("clearWaitMs", clearWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
             .putInt("scrollWaitMs", scrollWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
-            .putInt("scrollMm", scrollMmInput.text.toString().toIntOrNull()?.coerceIn(1, 200) ?: 20)
             .putInt("skipTopPct", skipTopInput.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 20)
             .apply()
         CheckboxService.instance?.applySettings()
