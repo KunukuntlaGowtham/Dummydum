@@ -62,6 +62,8 @@ class CheckboxService : AccessibilityService() {
     private val failed = ArrayList<Int>()         // their places once earlier failures are out
     private val failedBoxes = ArrayList<Int>()    // the same failures, as boxes of the run
     private val triedLooks = ArrayList<BoxLook.Look>()  // what the last boxes tried look like
+    private val triedNodes = ArrayList<AccessibilityNodeInfo>()  // checkboxes the tree gave us, tried
+    private var treeHadTried = false              // the last look at the tree found only tried ones
     private var pendingLook: BoxLook.Look? = null  // what the box waiting to be judged looks like
     private val tried = ArrayList<Rect>()         // boxes already had a go, moved with the page
     private var pendingBox: Rect? = null          // the box waiting to be judged
@@ -189,6 +191,8 @@ class CheckboxService : AccessibilityService() {
         failedBoxes.clear()
         tried.clear()
         triedLooks.clear()
+        triedNodes.clear()
+        treeHadTried = false
         pendingLook = null
         pendingBox = null
         pendingNode = null
@@ -232,6 +236,22 @@ class CheckboxService : AccessibilityService() {
             settleUp(null)
             if (!looping) return
             tryNode(node, p)
+            return
+        }
+        if (treeHadTried) {
+            // The page's checkboxes are in the tree, and every one on screen has had its go.
+            // Scroll on for new ones - never switch to tapping by sight here, which would press
+            // the same boxes a second time.
+            applyScroll(null, null)
+            settleUp(null)
+            if (!looping) return
+            if (scrolledOnce && emptyScrolls >= 3) {
+                stopLoop("Reached the end of the page")
+                return
+            }
+            status("nothing new here - scrolling on")
+            emptyScrolls++
+            scrollOn(p)
             return
         }
 
@@ -305,6 +325,7 @@ class CheckboxService : AccessibilityService() {
             loose = p.getBoolean("loose", true)
         )
         val targets = ArrayList<AccessibilityNodeInfo>()
+        treeHadTried = false
         for (root in roots()) {
             collect(root, targets, rules, 1)
             if (targets.isNotEmpty()) break
@@ -313,7 +334,9 @@ class CheckboxService : AccessibilityService() {
     }
 
     private fun tryNode(node: AccessibilityNodeInfo, p: SharedPreferences) {
+        emptyScrolls = 0
         attempts++
+        triedNodes.add(node)
         pendingBox = null
         pendingNode = node
         pendingBefore = if (node.isCheckable) node.isChecked else null
@@ -787,7 +810,9 @@ class CheckboxService : AccessibilityService() {
     ) {
         if (node == null || out.size >= max) return
         if (isTarget(node, rules)) {
-            out.add(node)
+            // One that has had its go already - it would not tick - is passed over, so the
+            // run moves on to the next instead of clicking the same one again and again.
+            if (looping && triedNodes.any { it == node }) treeHadTried = true else out.add(node)
             return  // a checkable row and its checkbox are the same tick, so stop here
         }
         for (i in 0 until node.childCount) {
