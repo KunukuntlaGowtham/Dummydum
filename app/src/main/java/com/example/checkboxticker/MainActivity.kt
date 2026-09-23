@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var auto: CheckBox
     private lateinit var pixels: CheckBox
     private lateinit var showStatus: CheckBox
+    private lateinit var retriesInput: EditText
     private lateinit var tapColour: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
@@ -103,6 +104,12 @@ class MainActivity : Activity() {
         root.addView(label("Gap between taps (ms)"))
         gapInput = number(p.getInt("gapMs", 250))
         root.addView(gapInput)
+
+        root.addView(label("Tries before a box is given up on"))
+        retriesInput = number(p.getInt("maxRetries", 1))
+        root.addView(retriesInput)
+        root.addView(note("1 means a box gets its tap, then one more go, and is then marked " +
+                "failed and passed over for the rest of the run. 0 means one go only."))
 
         root.addView(label("Most boxes in one run"))
         maxInput = number(p.getInt("maxTicks", 50))
@@ -216,6 +223,7 @@ class MainActivity : Activity() {
             .putBoolean("auto", auto.isChecked)
             .putBoolean("pixels", pixels.isChecked)
             .putBoolean("showStatus", showStatus.isChecked)
+            .putInt("maxRetries", retriesInput.text.toString().toIntOrNull()?.coerceIn(0, 5) ?: 1)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .putBoolean("tapColour", tapColour.isChecked)
