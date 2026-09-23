@@ -53,6 +53,10 @@ class ScreenService : Service() {
     val width get() = screenW
     val height get() = screenH
 
+    /** The last picture taken. With nothing moving on screen Android sends no new one. */
+    @Volatile
+    private var lastFrame: Frame? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -180,7 +184,14 @@ class ScreenService : Service() {
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
                     BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
-                        ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
+                        ?.let {
+                            val sx = screenW.toFloat() / frame.w
+                            val sy = screenH.toFloat() / frame.h
+                            Rect(
+                                (it.left * sx).toInt(), (it.top * sy).toInt(),
+                                (it.right * sx).toInt(), (it.bottom * sy).toInt()
+                            )
+                        }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "colour scan failed", t)
@@ -193,6 +204,79 @@ class ScreenService : Service() {
     private class Frame(val rgb: IntArray, val w: Int, val h: Int)
 
     /** One frame of the screen as plain colours. */
+    /**
+     * The average brightness of each row of the screen, from one picture. Two of these, one
+     * either side of a scroll, say how far the page actually moved - which the run needs,
+     * because a swipe's length and the page's movement are not the same thing.
+     */
+    fun rowProfile(done: (IntArray?) -> Unit) {
+        worker.post {
+            val profile = try {
+                grab()?.let { profileOf(it) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "profile failed", t)
+                null
+            }
+            main.post { done(profile) }
+        }
+    }
+
+    /** One picture, two answers: the boxes on it, and its row profile. */
+    fun findBoxesWithProfile(
+        minScreenPx: Int,
+        maxScreenPx: Int,
+        done: (List<Rect>, IntArray?) -> Unit
+    ) {
+        worker.post {
+            var boxes: List<Rect> = emptyList()
+            var profile: IntArray? = null
+            try {
+                val frame = grab()
+                if (frame != null) {
+                    boxes = detectIn(frame, minScreenPx / SCALE, maxScreenPx / SCALE)
+                    profile = profileOf(frame)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "screen scan failed", t)
+            }
+            main.post { done(boxes, profile) }
+        }
+    }
+
+    /**
+     * Rows are averaged over the right-hand part of the screen only: the floating button and
+     * the status panel sit on the left and never move, and would pull every comparison
+     * towards "the page did not move".
+     */
+    private fun profileOf(frame: Frame): IntArray {
+        val from = (frame.w * 55) / 100
+        val to = (frame.w * 95) / 100
+        val span = (to - from).coerceAtLeast(1)
+        val out = IntArray(frame.h)
+        for (y in 0 until frame.h) {
+            val row = y * frame.w
+            var sum = 0
+            for (x in from until to) {
+                val c = frame.rgb[row + x]
+                sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
+                        (c and 0xff) * 114) / 1000
+            }
+            out[y] = sum / span
+        }
+        return out
+    }
+
+    /** Profile rows to screen pixels, and back. */
+    fun rowsToScreen(rows: Int): Int {
+        val h = lastFrame?.h ?: return rows * SCALE
+        return if (h > 0) (rows.toLong() * screenH / h).toInt() else rows * SCALE
+    }
+
+    fun screenToRows(px: Int): Int {
+        val h = lastFrame?.h ?: return px / SCALE
+        return if (screenH > 0) (px.toLong() * h / screenH).toInt() else px / SCALE
+    }
+
     /**
      * Is an empty box still sitting in [region]? This is the check after a tap, and it reads
      * only that patch of the picture rather than hunting the whole screen again, which is
@@ -254,12 +338,18 @@ class ScreenService : Service() {
 
         var image = imageReader.acquireLatestImage()
         var tries = 0
-        while (image == null && tries < 12) {
-            Thread.sleep(40)
+        val known = lastFrame
+        val limit = if (known == null) 12 else 3
+        val pause = if (known == null) 40L else 15L
+        while (image == null && tries < limit) {
+            Thread.sleep(pause)
             image = imageReader.acquireLatestImage()
             tries++
         }
-        if (image == null) return null
+        // No new picture means nothing on screen changed, so the last one is still true.
+        // Returning nothing here instead made a tap that changed nothing - a box that would
+        // not tick - look like a box that was no longer empty, i.e. a success.
+        if (image == null) return known
 
         try {
             val plane = image.planes[0]
@@ -284,7 +374,9 @@ class ScreenService : Service() {
                     i += pixelStride
                 }
             }
-            return Frame(rgb, w, h)
+            val frame = Frame(rgb, w, h)
+            lastFrame = frame
+            return frame
         } finally {
             image.close()
         }
@@ -292,6 +384,10 @@ class ScreenService : Service() {
 
     private fun detect(minPx: Int, maxPx: Int): List<Rect> {
         val frame = grab() ?: return emptyList()
+        return detectIn(frame, minPx, maxPx)
+    }
+
+    private fun detectIn(frame: Frame, minPx: Int, maxPx: Int): List<Rect> {
         val lum = IntArray(frame.rgb.size)
         for (k in frame.rgb.indices) {
             val c = frame.rgb[k]
@@ -300,8 +396,16 @@ class ScreenService : Service() {
             val b = c and 0xff
             lum[k] = (r * 299 + g * 587 + b * 114) / 1000
         }
+        // The picture is a scaled copy of the screen and the two need not divide evenly, so
+        // places go back by the real ratio - the same one the check after a tap uses, so the
+        // tap and the check look at the same spot.
+        val sx = if (frame.w > 0 && screenW > 0) screenW.toFloat() / frame.w else SCALE.toFloat()
+        val sy = if (frame.h > 0 && screenH > 0) screenH.toFloat() / frame.h else SCALE.toFloat()
         return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map {
-            Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
+            Rect(
+                (it.left * sx).toInt(), (it.top * sy).toInt(),
+                (it.right * sx).toInt(), (it.bottom * sy).toInt()
+            )
         }
     }
 }

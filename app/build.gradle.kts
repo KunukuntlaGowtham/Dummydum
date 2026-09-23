@@ -21,3 +21,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
+
+dependencies {
+    // The run's box-by-box logic is plain Kotlin and is checked on every build.
+    testImplementation("junit:junit:4.13.2")
+}

@@ -58,14 +58,13 @@ class CheckboxService : AccessibilityService() {
     private var panel: TextView? = null
     private var lastStatus = ""
 
-    private var attempts = 0                      // which box this is, counting the whole run
-    private val failed = ArrayList<Int>()         // their places once earlier failures are out
-    private val candidates = Candidates()         // this screen's boxes, and the ones done with
-    private var nodeTaps = 0                      // tries at the box the tree is offering
-    private val failedNodes = ArrayList<Rect>()   // tree boxes given up on, by where they are
+    private val seq = Sequencer()                 // the one box in hand, the counts, the line
+    private var profileBefore: IntArray? = null   // the screen's rows just before a scroll
+    private var swipePx = 0                       // how far the last swipe asked to move
+    private var lastMoved = 0                     // how far the page actually moved
+    private var scrollPending = false
+    private var scrolledOnce = false
     private var emptyScrolls = 0
-    private var knownWidth = 0
-    private var knownHeight = 0
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -175,15 +174,17 @@ class CheckboxService : AccessibilityService() {
         ticked = 0
         lastBox = null
         updateBubble()
-        attempts = 0
-        failed.clear()
-        candidates.clear()
-        failedNodes.clear()
-        nodeTaps = 0
+        seq.begin()
+        profileBefore = null
+        swipePx = 0
+        lastMoved = 0
+        scrollPending = false
+        scrolledOnce = false
         emptyScrolls = 0
+        startFailedReport()
         toast("Running - press STOP to finish")
         status("Started")
-        step()
+        findCurrent()
     }
 
     fun stopLoop(why: String) {
@@ -191,259 +192,329 @@ class CheckboxService : AccessibilityService() {
         looping = false
         running = false
         lastBox = null
+        seq.stop()
         updateBubble()
-        status("$why - tried $attempts, ticked $ticked")
-        toast("$why after $ticked")
+        status("$why - ${seq.attempt} tried, ${seq.successes} ticked, ${seq.failures.size} failed")
+        toast("$why: ${seq.successes} ticked, ${seq.failures.size} failed")
     }
 
-    /**
-     * One pass of the run.
+    // ---------------------------------------------------------------- the run
+
+    /*
+     * One box at a time, strictly in this order:
      *
-     * The list of boxes is filled by a single look at the screen and then worked down: tap,
-     * verify that one box, move to the next entry in the list. Nothing is scanned again until
-     * the list is used up or the page has moved, and a box that will not tick is marked failed
-     * and dropped from the list rather than picked again.
+     *   FIND_CURRENT -> TAP_CURRENT -> VERIFY_CURRENT -> RECORD -> CLEAR_POPUP -> SCROLL
+     *        ^                                                                      |
+     *        +----------------------------------------------------------------------+
+     *
+     * Which box is "next" is decided by the Sequencer's line, never by "the first unchecked
+     * box on screen": a box whose result is recorded is above the line from then on, and
+     * the line moves up with the page by however far the page really moved. A failed box
+     * is therefore never picked again, although it still looks exactly like an empty box.
      */
-    private fun step() {
+
+    /** FIND_CURRENT: one look, one box. The same look settles how far the last scroll went. */
+    private fun findCurrent() {
         if (!looping) return
         val p = prefs()
 
-        if (attempts >= p.getInt("maxTicks", 50).coerceIn(1, 500)) {
+        if (seq.attempt >= p.getInt("maxTicks", 50).coerceIn(1, 500)) {
             stopLoop("Reached the limit of ${p.getInt("maxTicks", 50)}")
             return
         }
-
-        val node = treeTarget(p)
-        if (node != null) {
-            tryNode(node, p)
+        if (seq.failStreak >= p.getInt("maxFailStreak", 5).coerceIn(1, 100)) {
+            stopLoop("${seq.failStreak} failed in a row")
             return
         }
 
         val screen = ScreenService.instance
-        if (!p.getBoolean("pixels", true) || screen == null) {
-            status("nothing in the tree, and screen reading is off")
-            scrollOn(p)
+        if (screen == null) {
+            settleScroll(null, null)
+            choose(p, emptyList(), null)
             return
         }
-
-        forgetIfScreenChanged(screen)
-
-        val ready = candidates.next(maxRetries(p))
-        if (ready != null) {
-            tapCandidate(ready, p, screen)      // straight on, no new scan
-            return
-        }
-
-        // Only now, with the list used up, is another look worth taking.
-        screen.findBoxes(dp(14), dp(48)) { found ->
-            if (!looping) return@findBoxes
-            val usable = found.filter { !hitsBubble(it) }
-            candidates.refill(usable, tolerance())
-            val pick = candidates.next(maxRetries(p))
-            if (pick == null) {
-                status("nothing new here (${usable.size} seen) - scrolling on")
-                scrollOn(p)
-            } else {
-                status("${candidates.waiting(maxRetries(p))} to try on this screen")
-                tapCandidate(pick, p, screen)
-            }
+        screen.findBoxesWithProfile(dp(14), dp(48)) { found, profile ->
+            if (!looping) return@findBoxesWithProfile
+            settleScroll(screen, profile)
+            choose(p, found.filter { !hitsBubble(it) }.map { it.toBox() }, screen)
         }
     }
 
-    private fun maxRetries(p: SharedPreferences) = p.getInt("maxRetries", 1).coerceIn(0, 5)
+    /**
+     * Moves the line by how far the page actually moved, measured from the pictures taken
+     * either side of the scroll. Without screen reading only the swipe's length is known.
+     */
+    private fun settleScroll(screen: ScreenService?, after: IntArray?) {
+        if (!scrollPending) return
+        scrollPending = false
 
-    /** How far two rectangles may differ and still be the same box. */
-    private fun tolerance() = dp(12)
-
-    /** A turn of the phone changes every coordinate, so nothing remembered still applies. */
-    private fun forgetIfScreenChanged(screen: ScreenService) {
-        val w = screen.width
-        val h = screen.height
-        if (w != knownWidth || h != knownHeight) {
-            knownWidth = w
-            knownHeight = h
-            candidates.clear()
-            failedNodes.clear()
+        val before = profileBefore
+        profileBefore = null
+        lastMoved = if (screen != null && before != null && after != null) {
+            val expected = screen.screenToRows(swipePx)
+            val rows = Sequencer.measureShift(before, after, expected, expected * 2 + 20)
+            screen.rowsToScreen(rows)
+        } else {
+            swipePx
         }
+        seq.scrolled(lastMoved)
     }
 
-    private fun tapCandidate(candidate: Candidate, p: SharedPreferences, screen: ScreenService) {
-        if (candidate.number == 0) {
-            attempts++
-            candidate.number = attempts
+    /** The first unchecked box below the line: from the tree when it names them, else by sight. */
+    private fun choose(p: SharedPreferences, seen: List<Box>, screen: ScreenService?) {
+        val fromTree = treeBoxes(p)
+        val treePick = seq.pick(fromTree.map { it.first })
+        if (treePick != null) {
+            val node = fromTree.first { it.first == treePick }.second
+            emptyScrolls = 0
+            tapNode(node, treePick, p)
+            return
         }
-        candidate.taps++
-        candidate.state = BoxState.TAPPED
 
-        val ok = gestureTap(candidate.rect.exactCenterX(), candidate.rect.exactCenterY())
-        status("box ${candidate.number}: tap ${candidate.taps} at " +
-                "${candidate.rect.centerX()},${candidate.rect.centerY()}" +
+        val pick = if (screen != null && p.getBoolean("pixels", true)) seq.pick(seen) else null
+        if (pick != null) {
+            emptyScrolls = 0
+            tapBox(pick, p, screen!!)
+            return
+        }
+
+        // Nothing below the line. A page that did not move last time has nothing further.
+        if (scrolledOnce && lastMoved <= 0) {
+            stopLoop("Reached the end of the page")
+            return
+        }
+        emptyScrolls++
+        if (emptyScrolls > p.getInt("emptyScrolls", 6).coerceIn(1, 50)) {
+            stopLoop("Nothing left to tick")
+            return
+        }
+        status("nothing below the last box (${seen.size} seen) - scrolling on")
+        scrollOn(p)
+    }
+
+    /** TAP_CURRENT, for a box found by sight. */
+    private fun tapBox(box: Box, p: SharedPreferences, screen: ScreenService) {
+        seq.start(box)
+        val ok = gestureTap(box.centerX.toFloat(), box.centerY.toFloat())
+        status("box ${seq.attempt}: tapped ${box.centerX},${box.centerY}" +
                 (if (ok) "" else " - refused"))
-
-        // The pop-up covers the box, so it is dealt with before the box can be looked at.
         main.postDelayed({
-            if (!looping) return@postDelayed
-            afterTick {
-                if (!looping) return@afterTick
-                candidate.state = BoxState.VERIFYING
-                screen.stillEmpty(candidate.rect, dp(14), dp(48)) { empty ->
-                    if (!looping) return@stillEmpty
-                    judge(candidate, empty, p)
-                    step()
-                }
-            }
+            if (looping) verifyBox(box, maxRetries(p), p, screen)
         }, waitMs(p, "tickWaitMs", 300))
     }
 
-    private fun judge(candidate: Candidate, stillEmpty: Boolean, p: SharedPreferences) {
-        if (!stillEmpty) {
-            candidates.markCompleted(candidate)
-            ticked++
-            status("box ${candidate.number}: ticked")
-            return
+    /**
+     * VERIFY_CURRENT, by sight. Only this one box is looked at, and only its patch of the
+     * picture.
+     *
+     * Still an empty box there: not ticked. It gets [retriesLeft] more looks after a short
+     * wait in case the screen was slow, and is never tapped again - a second tap on a box
+     * that was only slow to show its tick would untick it.
+     *
+     * No empty box there: ticked - unless the pop-up is up, which may be sitting on top of
+     * the box. Then the pop-up is cleared first and the box looked at again. Either way the
+     * result is recorded before anything scrolls.
+     */
+    private fun verifyBox(box: Box, retriesLeft: Int, p: SharedPreferences, screen: ScreenService) {
+        seq.verifying()
+        screen.stillEmpty(box.toRect(), dp(14), dp(48)) { empty ->
+            if (!looping) return@stillEmpty
+
+            if (empty) {
+                if (retriesLeft > 0) {
+                    status("box ${seq.attempt}: not ticked yet, looking again")
+                    main.postDelayed({
+                        if (looping) verifyBox(box, retriesLeft - 1, p, screen)
+                    }, waitMs(p, "tickWaitMs", 300))
+                } else {
+                    record(false)
+                    clearPopupThenScroll(p)
+                }
+                return@stillEmpty
+            }
+
+            popupAt(p, screen) { popup ->
+                if (!looping) return@popupAt
+                if (popup == null) {
+                    record(true)
+                    scrollOn(p)
+                    return@popupAt
+                }
+                // The pop-up may be hiding the box: clear it, then look once more.
+                gestureTap(popup.exactCenterX(), popup.exactCenterY())
+                status("box ${seq.attempt}: pop-up cleared, checking the box")
+                main.postDelayed({
+                    if (!looping) return@postDelayed
+                    screen.stillEmpty(box.toRect(), dp(14), dp(48)) { emptyAfter ->
+                        if (!looping) return@stillEmpty
+                        record(!emptyAfter)
+                        scrollOn(p)
+                    }
+                }, waitMs(p, "clearWaitMs", 300))
+            }
         }
-        if (candidate.taps <= maxRetries(p)) {
-            candidate.state = BoxState.TAPPED       // one more go, then no more
-            status("box ${candidate.number}: no change, one more try")
-            return
-        }
-        candidates.markFailed(candidate)
-        recordFailure(candidate.number)
-        status("box ${candidate.number}: will not tick, moving on")
     }
 
-    /**
-     * The first box the tree offers that has not already been given up on. Without that
-     * exclusion a node that never changes stays first for ever and the run never gets past
-     * it - which is also why several are collected rather than one.
-     */
-    private fun treeTarget(p: SharedPreferences): AccessibilityNodeInfo? {
-        if (!p.getBoolean("useTree", true)) return null
-
-        val rules = Rules(
-            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
-            switches = p.getBoolean("switches", true),
-            radios = p.getBoolean("radios", false),
-            loose = p.getBoolean("loose", true)
-        )
-        val targets = ArrayList<AccessibilityNodeInfo>()
-        for (root in roots()) {
-            collect(root, targets, rules, 12)
-            if (targets.isNotEmpty()) break
-        }
-
-        for (node in targets) {
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
-            // A node with no place on screen cannot be told apart from the next one, and
-            // cannot be checked afterwards either, so it is left to the picture instead.
-            if (bounds.isEmpty) continue
-            if (failedNodes.any { Candidates.near(it, bounds, tolerance()) }) continue
-            return node
-        }
-        return null
-    }
-
-    /**
-     * The same idea where the app publishes its boxes: click, deal with the pop-up, ask the
-     * node itself whether it changed. A node that will not change is given up on after the
-     * same number of tries, so one stuck box cannot hold the run up here either.
-     */
-    private fun tryNode(node: AccessibilityNodeInfo, p: SharedPreferences) {
-        if (nodeTaps == 0) attempts++
-        nodeTaps++
-        val number = attempts
+    /** TAP_CURRENT and VERIFY_CURRENT where the app names its boxes: the node says itself. */
+    private fun tapNode(node: AccessibilityNodeInfo, box: Box, p: SharedPreferences) {
+        seq.start(box)
         val before = if (node.isCheckable) node.isChecked else null
-
         var ok = clickNode(node)
         if (!ok) ok = gestureTap(node)
-        status("box $number: click $nodeTaps on " +
+        status("box ${seq.attempt}: clicked " +
                 (node.className ?: "a node").toString().substringAfterLast('.') +
                 (if (ok) "" else " - refused"))
 
         main.postDelayed({
-            if (!looping) return@postDelayed
-            afterTick {
-                if (!looping) return@afterTick
-                val changed = before == null || stateChanged(node, before)
-                if (changed) {
-                    ticked++
-                    nodeTaps = 0
-                    status("box $number: ticked")
-                } else if (nodeTaps <= maxRetries(p)) {
-                    status("box $number: no change, one more try")
-                } else {
-                    nodeTaps = 0
-                    val bounds = Rect()
-                    node.getBoundsInScreen(bounds)
-                    if (!bounds.isEmpty) failedNodes.add(bounds)
-                    recordFailure(number)
-                    status("box $number: will not tick, moving on")
-                }
-                step()
-            }
+            if (looping) verifyNode(node, box, before, maxRetries(p), p)
         }, waitMs(p, "tickWaitMs", 300))
     }
 
-    /**
-     * Writes down a box that would not tick. It is shown by its place once the earlier
-     * failures are taken out of the list: boxes 5, 7 and 10 failing read as 5, 6 and 8.
-     */
-    private fun recordFailure(number: Int) {
-        val shown = number - failed.size
-        failed.add(shown)
-        try {
-            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
-                it.write("box $number of the run, shown as $shown\n".toByteArray())
+    private fun verifyNode(
+        node: AccessibilityNodeInfo,
+        box: Box,
+        before: Boolean?,
+        retriesLeft: Int,
+        p: SharedPreferences
+    ) {
+        seq.verifying()
+        val screen = ScreenService.instance
+
+        // A node that never said it was a checkbox has no state to read; look at it instead.
+        if (before == null) {
+            if (screen != null) {
+                verifyBox(box, retriesLeft, p, screen)
+            } else {
+                record(true)
+                clearPopupThenScroll(p)
             }
+            return
+        }
+
+        if (stateChanged(node, before)) {
+            record(true)
+            clearPopupThenScroll(p)
+        } else if (retriesLeft > 0) {
+            status("box ${seq.attempt}: not ticked yet, looking again")
+            main.postDelayed({
+                if (looping) verifyNode(node, box, before, retriesLeft - 1, p)
+            }, waitMs(p, "tickWaitMs", 300))
+        } else {
+            record(false)
+            clearPopupThenScroll(p)
+        }
+    }
+
+    /**
+     * RECORD. From here the box is settled: the line drops below it and it is never chosen
+     * again, whatever it looks like after the scroll.
+     */
+    private fun record(success: Boolean) {
+        val physical = seq.attempt
+        if (success) {
+            seq.succeeded()
+            status("box $physical: ticked")
+            return
+        }
+        val shown = seq.failed()
+        recordFailure(physical, shown)
+        status("box $physical: FAILED - listed as $shown")
+    }
+
+    /**
+     * Writes a failure down with both its numbers. The list reads by the shown number - the
+     * box's place once earlier failures are taken out - and keeps the physical one alongside.
+     */
+    private fun recordFailure(physical: Int, shown: Int) {
+        val line = if (physical == shown) "$shown\n" else "$shown   (physical box $physical)\n"
+        try {
+            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use { it.write(line.toByteArray()) }
         } catch (e: Exception) {
             android.util.Log.e("CheckboxTicker", "could not write the failure", e)
         }
         updatePanel()
     }
 
+    /** Each run gets its own heading in the failed-box report. */
+    private fun startFailedReport() {
+        val stamp = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.US)
+            .format(java.util.Date())
+        val heading = "--- run of $stamp: failed boxes, numbered with earlier failures " +
+                "taken out ---\n"
+        try {
+            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use { it.write(heading.toByteArray()) }
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "could not start the report", e)
+        }
+    }
+
+    /** CLEAR_POPUP, then SCROLL. */
+    private fun clearPopupThenScroll(p: SharedPreferences) {
+        seq.scrolling()
+        afterTick { if (looping) scrollOn(p) }
+    }
+
+    /** Finds the pop-up's button, if the pop-up is up. */
+    private fun popupAt(p: SharedPreferences, screen: ScreenService, done: (Rect?) -> Unit) {
+        if (!p.getBoolean("tapColour", true)) {
+            done(null)
+            return
+        }
+        screen.findColour(
+            p.getInt("colour", DEFAULT_COLOUR),
+            p.getInt("colourTol", 60).coerceIn(0, 200),
+            p.getInt("skipTopPct", 20).coerceIn(0, 90),
+            done
+        )
+    }
+
     /**
-     * Scrolls on and takes the one look that the new part of the page needs. How far the page
-     * actually moved is read from the boxes themselves, so a failed box that is still on
-     * screen is recognised in its new place instead of looking like a fresh one.
+     * SCROLL. A picture is taken just before, so the next look can tell how far the page
+     * really moved - a swipe's length is not the page's movement.
      */
     private fun scrollOn(p: SharedPreferences) {
-        val anchors = candidates.anchors()
-        status("scrolling ${p.getInt("scrollMm", 20)} mm")
-        val expected = -scrollScreen(p.getInt("scrollMm", 20))
-
-        main.postDelayed({
-            if (!looping) return@postDelayed
-            val screen = ScreenService.instance
-            if (screen == null) {
-                candidates.shift(expected)
-                step()
-                return@postDelayed
-            }
-            screen.findBoxes(dp(14), dp(48)) { found ->
-                if (!looping) return@findBoxes
-                val usable = found.filter { !hitsBubble(it) }
-                val moved = Candidates.measureShift(anchors, usable, expected, tolerance())
-                candidates.shift(moved)
-                for (rect in failedNodes) rect.offset(0, moved)
-                failedNodes.removeAll { it.bottom <= 0 }
-                candidates.refill(usable, tolerance())
-
-                val pick = candidates.next(maxRetries(p))
-                if (pick == null) {
-                    emptyScrolls++
-                    if (emptyScrolls >= p.getInt("emptyScrolls", 6).coerceIn(1, 50)) {
-                        stopLoop("Nothing left to tick")
-                    } else {
-                        scrollOn(p)
-                    }
-                } else {
-                    emptyScrolls = 0
-                    tapCandidate(pick, p, screen)
-                }
-            }
-        }, waitMs(p, "scrollWaitMs", 300))
+        seq.scrolling()
+        val mm = p.getInt("scrollMm", 20)
+        val screen = ScreenService.instance
+        val go = { before: IntArray? ->
+            profileBefore = before
+            status("scrolling $mm mm")
+            swipePx = scrollScreen(mm)
+            scrollPending = true
+            scrolledOnce = true
+            main.postDelayed({ findCurrent() }, waitMs(p, "scrollWaitMs", 300))
+        }
+        if (screen == null) go(null) else screen.rowProfile { before -> if (looping) go(before) }
     }
+
+    private fun maxRetries(p: SharedPreferences) = p.getInt("maxRetries", 1).coerceIn(0, 5)
+
+    /** The boxes the tree names, each with its place on screen. Off entirely if asked. */
+    private fun treeBoxes(p: SharedPreferences): List<Pair<Box, AccessibilityNodeInfo>> {
+        if (!p.getBoolean("useTree", true)) return emptyList()
+        val rules = Rules(
+            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
+            switches = p.getBoolean("switches", true),
+            radios = p.getBoolean("radios", false),
+            loose = p.getBoolean("loose", true)
+        )
+        val nodes = ArrayList<AccessibilityNodeInfo>()
+        for (root in roots()) collect(root, nodes, rules, 20)
+
+        val out = ArrayList<Pair<Box, AccessibilityNodeInfo>>()
+        for (node in nodes) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            // With no place on screen a node cannot be put in order against the line.
+            if (bounds.isEmpty) continue
+            out.add(bounds.toBox() to node)
+        }
+        return out
+    }
+
+    private fun Rect.toBox() = Box(left, top, right, bottom)
+
+    private fun Box.toRect() = Rect(left, top, right, bottom)
 
     /** A short, controlled swipe up, so the page moves on by about [mm] millimetres. */
     private fun scrollScreen(mm: Int): Int {
@@ -485,10 +556,10 @@ class CheckboxService : AccessibilityService() {
             return
         }
         val view = ensurePanel() ?: return
-        val tally = if (failed.isEmpty()) {
+        val tally = if (seq.failures.isEmpty()) {
             "none failed"
         } else {
-            "failed ${failed.size}: " + failed.joinToString(", ")
+            "failed ${seq.failures.size}: " + seq.failures.joinToString(", ") { it.shown.toString() }
         }
         view.text = "$lastStatus\n$tally"
     }
