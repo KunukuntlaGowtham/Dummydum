@@ -77,10 +77,13 @@ class CheckboxService : AccessibilityService() {
     private val reverseFailed = ArrayList<Int>()  // which of those would not tick (0 = lowest)
     private val reverseTried = ArrayList<Rect>()
     private val reverseTriedNodes = ArrayList<AccessibilityNodeInfo>()
-    private var reversePendingBox: Rect? = null
-    private var reversePendingNode: AccessibilityNodeInfo? = null
-    private var reversePendingBefore: Boolean? = null
-    private var reversePendingIndex = -1
+    private class TappedBox(val box: Rect, val index: Int)
+    private class TappedNode(val node: AccessibilityNodeInfo, val before: Boolean?, val index: Int)
+    private val reversePendingBoxes = ArrayList<TappedBox>()   // this set, waiting to be judged
+    private val reversePendingNodes = ArrayList<TappedNode>()
+    private val setBoxes = ArrayList<Rect>()      // the rest of the set on screen, lowest first
+    private val setNodes = ArrayList<AccessibilityNodeInfo>()
+    private var reverseIdle = 0                   // scrolls back up that found nothing to tick
     private var autoMode = false
     private var silentRun = false
     private var lastAutoRun = 0L
@@ -205,9 +208,11 @@ class CheckboxService : AccessibilityService() {
         reverseFailed.clear()
         reverseTried.clear()
         reverseTriedNodes.clear()
-        reversePendingBox = null
-        reversePendingNode = null
-        reversePendingBefore = null
+        reversePendingBoxes.clear()
+        reversePendingNodes.clear()
+        setBoxes.clear()
+        setNodes.clear()
+        reverseIdle = 0
         toast("Running - press STOP to finish")
         status("Started")
         step()
@@ -400,16 +405,19 @@ class CheckboxService : AccessibilityService() {
         reverseFailed.clear()
         reverseTried.clear()
         reverseTriedNodes.clear()
-        reversePendingBox = null
-        reversePendingNode = null
-        reversePendingBefore = null
+        reversePendingBoxes.clear()
+        reversePendingNodes.clear()
+        setBoxes.clear()
+        setNodes.clear()
+        reverseIdle = 0
         status("box $shown keeps failing - ticking from the bottom up to it")
     }
 
     /**
-     * One pass of the way out: settle up for the last box, then tap the lowest box still
-     * empty below the stuck one, clear the pop-up, scroll back up a little, and go again.
-     * When no box is left below the stuck one, the run stops there.
+     * One pass of the way out. Settle up for the set tapped last time, then take every empty
+     * checkbox on screen below the stuck one and tick them all, lowest first, clearing the
+     * pop-up after each. Then scroll back up 10 mm for the next set, and go again. Once the
+     * stuck box is on screen with nothing left to tick below it, the run stops there.
      */
     private fun reverseStep(p: SharedPreferences) {
         if (!looping) return
@@ -426,49 +434,62 @@ class CheckboxService : AccessibilityService() {
         }
         screen.findBoxes(dp(14), dp(48)) { boxes ->
             if (!looping) return@findBoxes
-            val last = reversePendingBox
-            if (last != null) {
-                if (boxes.any { Rect.intersects(it, last) }) reverseFailed.add(reversePendingIndex)
-                reversePendingBox = null
+            // Last set: a box still empty where it was tapped would not tick.
+            for (t in reversePendingBoxes) {
+                if (boxes.any { Rect.intersects(it, t.box) }) reverseFailed.add(t.index)
             }
-            val below = stuck.bottom
-            val box = boxes
+            reversePendingBoxes.clear()
+
+            val set = boxes
                 .filter { found ->
-                    !hitsBubble(found) && found.centerY() > below &&
+                    !hitsBubble(found) && found.centerY() > stuck.bottom &&
                             reverseTried.none { Rect.intersects(it, found) }
                 }
-                .maxByOrNull { it.centerY() }
-            if (box == null) {
-                finishReverse()
+                .sortedByDescending { it.centerY() }
+            if (set.isEmpty()) {
+                nothingInThisSet(p, stuck.top >= 0)
                 return@findBoxes
             }
-            reverseTried.add(Rect(box))
-            reversePendingBox = Rect(box)
-            reversePendingIndex = reverseTaps
-            reverseTaps++
-            val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
-            if (ok) ticked++
-            status("from the bottom, box ${reverseTaps}: tapped ${box.centerX()},${box.centerY()}" +
-                    (if (ok) "" else " - refused"))
-            main.postDelayed({
-                if (looping) afterTick { if (looping) scrollBack(prefs()) }
-            }, waitMs(p, "tickWaitMs", 300))
+            reverseIdle = 0
+            setBoxes.clear()
+            setBoxes.addAll(set.map { Rect(it) })
+            status("${set.size} to tick on this screen")
+            tapNextBox(p)
         }
     }
 
-    private fun reverseByTree(p: SharedPreferences, stuck: AccessibilityNodeInfo) {
-        val last = reversePendingNode
-        val before = reversePendingBefore
-        if (last != null) {
-            if (before != null && !stateChanged(last, before)) reverseFailed.add(reversePendingIndex)
-            reversePendingNode = null
-            reversePendingBefore = null
+    /** Taps the next box of the set on screen; after the last one, scrolls back up. */
+    private fun tapNextBox(p: SharedPreferences) {
+        if (!looping) return
+        if (setBoxes.isEmpty()) {
+            scrollBack(p)
+            return
         }
+        val box = setBoxes.removeAt(0)
+        reverseTried.add(Rect(box))
+        reversePendingBoxes.add(TappedBox(Rect(box), reverseTaps))
+        reverseTaps++
+        val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+        if (ok) ticked++
+        status("from the bottom, box $reverseTaps: tapped ${box.centerX()},${box.centerY()}" +
+                (if (ok) "" else " - refused"))
+        main.postDelayed({
+            if (looping) afterTick { if (looping) tapNextBox(prefs()) }
+        }, waitMs(p, "tickWaitMs", 300))
+    }
+
+    private fun reverseByTree(p: SharedPreferences, stuck: AccessibilityNodeInfo) {
+        for (t in reversePendingNodes) {
+            if (t.before != null && !stateChanged(t.node, t.before)) reverseFailed.add(t.index)
+        }
+        reversePendingNodes.clear()
 
         val stuckAt = Rect()
+        var stuckVisible = false
         try {
             stuck.refresh()
             stuck.getBoundsInScreen(stuckAt)
+            stuckVisible = stuck.isVisibleToUser && !stuckAt.isEmpty
         } catch (e: Exception) {
         }
         val rules = Rules(
@@ -479,21 +500,34 @@ class CheckboxService : AccessibilityService() {
         )
         val targets = ArrayList<AccessibilityNodeInfo>()
         for (root in roots()) collect(root, targets, rules, 200)
-        val node = targets
+        val set = targets
             .filter { found ->
                 found != stuck && reverseTriedNodes.none { it == found } &&
                         boundsOf(found).centerY() > stuckAt.bottom
             }
-            .maxByOrNull { boundsOf(it).centerY() }
-        if (node == null) {
-            finishReverse()
+            .sortedByDescending { boundsOf(it).centerY() }
+        if (set.isEmpty()) {
+            nothingInThisSet(p, stuckVisible)
             return
         }
+        reverseIdle = 0
+        setNodes.clear()
+        setNodes.addAll(set)
+        status("${set.size} to tick on this screen")
+        tapNextNode(p)
+    }
 
+    private fun tapNextNode(p: SharedPreferences) {
+        if (!looping) return
+        if (setNodes.isEmpty()) {
+            scrollBack(p)
+            return
+        }
+        val node = setNodes.removeAt(0)
         reverseTriedNodes.add(node)
-        reversePendingNode = node
-        reversePendingBefore = if (node.isCheckable) node.isChecked else null
-        reversePendingIndex = reverseTaps
+        reversePendingNodes.add(
+            TappedNode(node, if (node.isCheckable) node.isChecked else null, reverseTaps)
+        )
         reverseTaps++
         var ok = clickNode(node)
         if (!ok) ok = gestureTap(node)
@@ -502,8 +536,22 @@ class CheckboxService : AccessibilityService() {
                 (node.className ?: "a node").toString().substringAfterLast('.') +
                 (if (ok) "" else " - refused"))
         main.postDelayed({
-            if (looping) afterTick { if (looping) scrollBack(prefs()) }
+            if (looping) afterTick { if (looping) tapNextNode(prefs()) }
         }, waitMs(p, "tickWaitMs", 300))
+    }
+
+    /**
+     * Nothing left to tick below the stuck box on this screen. With the stuck box in view,
+     * that is the job done; otherwise it is still further up, so keep scrolling back to it.
+     */
+    private fun nothingInThisSet(p: SharedPreferences, stuckInView: Boolean) {
+        reverseIdle++
+        if (stuckInView || reverseIdle > 30) {
+            finishReverse()
+        } else {
+            status("nothing to tick here - scrolling back towards box $stuckShown")
+            scrollBack(p)
+        }
     }
 
     private fun boundsOf(node: AccessibilityNodeInfo): Rect {
@@ -512,14 +560,14 @@ class CheckboxService : AccessibilityService() {
         return r
     }
 
-    /** Scrolls back up by a couple of millimetres; what is on screen moves down with it. */
+    /** Scrolls back up by 10 mm for the next set; what is on screen moves down with it. */
     private fun scrollBack(p: SharedPreferences) {
-        val mm = p.getInt("backMm", 2)
+        val mm = p.getInt("backMm", 10)
         status("scrolling back $mm mm")
         val moved = scrollScreen(mm, up = true)
         stuckBox?.offset(0, moved)
         for (rect in reverseTried) rect.offset(0, moved)
-        reversePendingBox?.offset(0, moved)
+        for (t in reversePendingBoxes) t.box.offset(0, moved)
         main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
     }
 
