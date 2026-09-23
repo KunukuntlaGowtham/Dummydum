@@ -230,6 +230,7 @@ class CheckboxService : AccessibilityService() {
         if (node != null) {
             applyScroll(null, null)
             settleUp(null)
+            if (!looping) return
             tryNode(node, p)
             return
         }
@@ -250,6 +251,7 @@ class CheckboxService : AccessibilityService() {
             applyScroll(screen, sketch)
             val looks = if (sketch == null) null else boxes.map { lookOf(sketch, it) }
             settleUp(boxes, looks)
+            if (!looping) return@findBoxesWithSketch
 
             val index = boxes.indices.firstOrNull { i ->
                 !hitsBubble(boxes[i]) && !alreadyTried(boxes[i], looks?.get(i))
@@ -364,6 +366,9 @@ class CheckboxService : AccessibilityService() {
         val shown = number - failed.size
         failed.add(shown)
         failedBoxes.add(number)
+        // A safety net: if boxes stop ticking altogether, stop rather than go round forever.
+        val inARow = failedBoxes.size >= 8 &&
+                failedBoxes.takeLast(8).let { it.last() - it.first() == 7 }
         try {
             openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
                 it.write("box $number of the run, shown as $shown\n".toByteArray())
@@ -372,6 +377,7 @@ class CheckboxService : AccessibilityService() {
             android.util.Log.e("CheckboxTicker", "could not write the failure", e)
         }
         updatePanel()
+        if (inARow) stopLoop("8 boxes in a row would not tick")
     }
 
     /**
@@ -523,10 +529,11 @@ class CheckboxService : AccessibilityService() {
 
     /**
      * A box together with what is written beside it: from just left of the box, 300 dp
-     * across and about 110 dp down - on a form, the name, date of birth, age and number.
+     * across and 140 dp down - on a form, the name, date of birth, age and number. Always
+     * the same size, whatever size the box was found at this time.
      */
     private fun lookOf(sketch: PageShift.Sketch, box: Rect): BoxLook.Look =
-        BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), box.height() + dp(114))
+        BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), dp(140))
 
     /**
      * Has this box had its go already? Recognised by how it and its words look, so the answer

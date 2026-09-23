@@ -25,7 +25,7 @@ object BoxLook {
     /** Up to this share of inked cells may differ and the two are still the same box. */
     private const val SAME = 0.10
 
-    /** How many rows up or down to try when lining the two up. */
+    /** How many rows up or down to try when lining the two up (and one cell either side). */
     private const val SLACK = 5
 
     /** Fewer inked cells than this is too little to recognise anything by. */
@@ -85,25 +85,28 @@ object BoxLook {
      * ever found on screen, so a box that did tick is never compared at all.)
      */
     fun same(a: Look, b: Look): Boolean {
-        if (a.cols != b.cols || a.rows != b.rows) return false
-        val cols = a.cols
-        val rows = a.rows
+        // The box is found a pixel or two differently each time, so the two may be a row or
+        // a cell apart in size and in place: compare what they share, at every small offset.
+        val cols = minOf(a.cols, b.cols)
+        val rows = minOf(a.rows, b.rows)
         for (dy in -SLACK..SLACK) {
-            var inked = 0
-            var differ = 0
-            for (r in maxOf(0, -dy) until minOf(rows, rows - dy)) {
-                val ra = r * cols
-                val rb = (r + dy) * cols
-                for (c in 0 until cols) {
-                    val va = a.cells[ra + c]
-                    val vb = b.cells[rb + c]
-                    if (va == PageShift.SKIP || vb == PageShift.SKIP) continue
-                    if (va >= INK && vb >= INK) continue
-                    inked++
-                    if (abs(va - vb) > DIFFERENT) differ++
+            for (dx in -1..1) {
+                var inked = 0
+                var differ = 0
+                for (r in maxOf(0, -dy) until minOf(rows, rows - dy)) {
+                    val ra = r * a.cols
+                    val rb = (r + dy) * b.cols
+                    for (c in maxOf(0, -dx) until minOf(cols, cols - dx)) {
+                        val va = a.cells[ra + c]
+                        val vb = b.cells[rb + c + dx]
+                        if (va == PageShift.SKIP || vb == PageShift.SKIP) continue
+                        if (va >= INK && vb >= INK) continue
+                        inked++
+                        if (abs(va - vb) > DIFFERENT) differ++
+                    }
                 }
+                if (inked >= FEWEST && differ <= inked * SAME) return true
             }
-            if (inked >= FEWEST && differ <= inked * SAME) return true
         }
         return false
     }

@@ -76,6 +76,15 @@ class BoxLookTest {
     }
 
     @Test
+    fun `found a little bigger and a cell to the side, still the same box`() {
+        val p = page(6)
+        val first = BoxLook.cut(screen(p, 300), 0, 208, 50, 140)
+        val later = BoxLook.cut(screen(p, 373), 1, 136, 51, 142)
+        assertTrue(BoxLook.same(first, later))
+        assertTrue(BoxLook.same(later, first))
+    }
+
+    @Test
     fun `neighbouring boxes are different boxes`() {
         val p = page(6)
         val s = screen(p, 300)
