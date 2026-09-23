@@ -41,8 +41,8 @@ a **scan report** instead; see below.
 | Also tick radio buttons | Includes `RadioButton` controls (off by default — they usually cancel each other out). |
 | Also web page and custom boxes | Catches controls that never report themselves as checkable (see below). |
 | Show the floating TICK button | Draws the draggable bubble. It is an accessibility overlay, so no "draw over other apps" permission is needed. |
-| Auto-tick whenever the screen changes | Starts the same one-box-at-a-time run as START when the screen changes and nothing is running (1.5 s cooldown). If the first scan finds nothing to tick it ends at once, so it never scrolls a page without checkboxes. |
-| Gap between taps | No longer used: runs wait on *After ticking a box*, *After clearing the pop-up* and *After scrolling* instead. |
+| Auto-tick whenever the screen changes | Runs by itself on each new screen, with a 1.5 s cooldown between runs. |
+| Gap between taps | Milliseconds between one tick and the next (minimum 60 ms). |
 | Most boxes in one run | Upper bound on how many boxes a single run touches. |
 
 ## Web pages inside an app
@@ -98,7 +98,7 @@ Notes:
 
 * The frame is measured on the phone and dropped. Nothing is stored and nothing is sent.
 * Screen reading is used only on a run you ask for (the floating button, or *Tick in
-  5 seconds*, or automatic mode) - all of them start the same single run.
+  5 seconds*), never by auto mode, which would tap wildly on every screen change.
 * Android shows a screen-capture notice while it is on; the permission ends when you
   reboot or swipe the notification's service away.
 

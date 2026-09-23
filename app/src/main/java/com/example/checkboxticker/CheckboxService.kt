@@ -5,7 +5,9 @@ import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -49,23 +51,22 @@ class CheckboxService : AccessibilityService() {
     private var bubble: TextView? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
 
+    private var running = false
     private var looping = false
-    private var runId = 0                         // stamps every callback with its run
-    private var autoRun = false
-    private var screenAtStart = false
-    private var reportStarted = false
-    private var currentNode: AccessibilityNodeInfo? = null   // the target, when the app names it
+    private var ticked = 0
+    private var lastBox: Rect? = null
     private var panel: TextView? = null
     private var lastStatus = ""
 
-    private val seq = Sequencer()                 // the one box in hand, the counts, the line
-    private var profileBefore: IntArray? = null   // the screen's rows just before a scroll
-    private var swipePx = 0                       // how far the last swipe asked to move
-    private var lastMoved = 0                     // how far the page actually moved
-    private var scrollPending = false
-    private var scrolledOnce = false
-    private var emptyScrolls = 0
+    private var attempts = 0                      // which box this is, counting the whole run
+    private val failed = ArrayList<Int>()         // their places once earlier failures are out
+    private val tried = ArrayList<Rect>()         // boxes already had a go, moved with the page
+    private var pendingBox: Rect? = null          // the box waiting to be judged
+    private var pendingNode: AccessibilityNodeInfo? = null
+    private var pendingBefore: Boolean? = null
+    private var pendingNumber = 0
     private var autoMode = false
+    private var silentRun = false
     private var lastAutoRun = 0L
 
     // ---------------------------------------------------------------- lifecycle
@@ -80,9 +81,6 @@ class CheckboxService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         looping = false
-        runId++
-        currentNode = null
-        seq.stop()
         hidePanel()
         hideBubble()
         instance = null
@@ -90,13 +88,12 @@ class CheckboxService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || !autoMode || looping) return
+        if (event == null || !autoMode || running) return
         if (event.packageName?.toString() == packageName) return
         val now = SystemClock.uptimeMillis()
         if (now - lastAutoRun < 1500L) return
         lastAutoRun = now
-        // The same one-at-a-time engine as START - there is no other way to tap.
-        main.postDelayed({ if (autoMode && !looping) startLoop(auto = true) }, 400L)
+        main.postDelayed({ if (autoMode && !running) tickAll(fromAuto = true) }, 400L)
     }
 
     // ---------------------------------------------------------------- settings
@@ -113,6 +110,53 @@ class CheckboxService : AccessibilityService() {
 
     fun isAutoOn() = autoMode
 
+    // ---------------------------------------------------------------- the work
+
+    /** Ticks every checkbox currently on screen, one after another. */
+    fun tickAll(fromAuto: Boolean) {
+        if (running) return
+        val roots = roots()
+        if (roots.isEmpty()) {
+            if (!fromAuto) toast("Nothing to read - switch to the app you want ticked")
+            return
+        }
+
+        val p = prefs()
+        val rules = Rules(
+            onlyUnchecked = p.getBoolean("onlyUnchecked", true),
+            switches = p.getBoolean("switches", true),
+            radios = p.getBoolean("radios", false),
+            loose = p.getBoolean("loose", true)
+        )
+        val gap = p.getInt("gapMs", 250).coerceIn(0, 5000)
+        val max = p.getInt("maxTicks", 50).coerceIn(1, 500)
+
+        val targets = ArrayList<AccessibilityNodeInfo>()
+        for (root in roots) collect(root, targets, rules, max)
+
+        if (targets.isEmpty()) {
+            // Nothing in the tree: look at the screen itself instead. Only on a run you
+            // asked for - guessing from pixels on every screen change would tap wildly.
+            if (!fromAuto && p.getBoolean("pixels", true) && ScreenService.instance != null) {
+                tickByPixels(fromAuto)
+                return
+            }
+            if (!fromAuto) {
+                saveReport()
+                toast(
+                    if (roots.isEmpty()) "This app shows nothing to read - turn on screen reading in the app"
+                    else "No checkbox found - scan report saved, open the app to read it"
+                )
+            }
+            return
+        }
+
+        running = true
+        silentRun = fromAuto
+        updateBubble()
+        tickNext(targets, 0, gap, 0)
+    }
+
     // ---------------------------------------------------------------- start / stop
 
     fun isLooping() = looping
@@ -121,468 +165,182 @@ class CheckboxService : AccessibilityService() {
         if (looping) stopLoop("Stopped") else startLoop()
     }
 
-    /**
-     * Starts the one engine that taps. START, the floating button, "Start in 5 seconds" and
-     * automatic mode all come in here, so two runs can never tap side by side.
-     *
-     * [auto] marks a run started by automatic mode. If its first scan finds nothing to tick
-     * it ends there, quietly - automatic mode never scrolls a page that has no checkboxes.
-     */
-    fun startLoop(auto: Boolean = false) {
+    /** Tick a box, clear its pop-up, scroll on a little, and keep going until STOP. */
+    fun startLoop() {
         if (looping) return
         looping = true
-        runId++
-        autoRun = auto
-        reportStarted = false
-        currentNode = null
-        screenAtStart = ScreenService.instance != null
-        seq.begin()
-        profileBefore = null
-        swipePx = 0
-        lastMoved = 0
-        scrollPending = false
-        scrolledOnce = false
-        emptyScrolls = 0
+        running = true
+        silentRun = false
+        ticked = 0
+        lastBox = null
         updateBubble()
-        if (!auto) toast("Running - press STOP to finish")
-        status(if (auto) "Automatic: looking for a checkbox" else "Started")
-        findTarget(runId)
+        attempts = 0
+        failed.clear()
+        tried.clear()
+        pendingBox = null
+        pendingNode = null
+        pendingBefore = null
+        pendingNumber = 0
+        toast("Running - press STOP to finish")
+        status("Started")
+        step()
     }
 
     fun stopLoop(why: String) {
         if (!looping) return
         looping = false
-        runId++                   // whatever is still scheduled for the old run now does nothing
-        currentNode = null
-        lastAutoRun = SystemClock.uptimeMillis()
-        seq.stop()
+        running = false
+        lastBox = null
         updateBubble()
-        status("$why - ${seq.attempt} tried, ${seq.successes} ticked, ${seq.failures.size} failed")
-        if (!autoRun || seq.attempt > 0) {
-            toast("$why: ${seq.successes} ticked, ${seq.failures.size} failed")
-        }
+        status("$why - tried $attempts, ticked $ticked")
+        toast("$why after $ticked")
     }
 
-    /** Whether a callback scheduled for run [run] may still act. */
-    private fun alive(run: Int) = looping && run == runId
-
-    /** Moves the run to [to]. A step out of order stops the run instead of tapping on. */
-    private fun enter(to: TickState): Boolean {
-        if (seq.moveTo(to)) return true
-        orderStop(to)
-        return false
-    }
-
-    private fun orderStop(to: TickState) {
-        stopLoop("Stopped: ${seq.state} cannot be followed by $to")
-    }
-
-    // ---------------------------------------------------------------- the run
-
-    /*
-     * The only code that taps. One target at a time, every step in this order:
-     *
-     *   FIND_TARGET -> TAPPING -> VERIFYING -> RECORDING_RESULT -> CLEARING_POPUP
-     *        ^                                                          |
-     *        +------- WAITING_FOR_SCROLL <---------- SCROLLING <--------+
-     *
-     * The Sequencer holds the state and refuses any step out of order, so a second tap
-     * before the first box is settled, or a fresh search straight after a failure, cannot
-     * happen. Every callback carries the number of the run it belongs to and does nothing
-     * once that run has stopped, so a quick STOP then START cannot leave two chains going.
-     *
-     * The next target always comes from a fresh scan and is the first empty box below the
-     * Sequencer's line. Once a box's result is recorded it is above that line, so a failed
-     * box - which still looks empty - is never chosen again. Nothing is kept from one scan to
-     * the next except that line: no rectangles, no list, no queue.
+    /**
+     * One pass of the run. The look it takes at the screen does two jobs at once: it settles
+     * up for the box tried last time - still empty means that one failed - and it picks the
+     * next box to try. So a box that will not tick costs nothing at all: no second look, no
+     * waiting on it, its number is written down and the run carries straight on.
      */
-
-    /** FIND_TARGET: one fresh scan, at most one target. */
-    private fun findTarget(run: Int) {
-        if (!alive(run)) return
+    private fun step() {
+        if (!looping) return
         val p = prefs()
 
-        val limit = p.getInt("maxTicks", 50).coerceIn(1, 500)
-        if (seq.attempt >= limit) {
-            stopLoop("Reached the limit of $limit")
-            return
-        }
-        val streakLimit = p.getInt("maxFailStreak", 5)
-        if (streakLimit > 0 && seq.failStreak >= streakLimit) {
-            stopLoop("${seq.failStreak} failed in a row")
+        val node = treeTarget(p)
+        if (node != null) {
+            settleUp(null)
+            tryNode(node, p)
             return
         }
 
         val screen = ScreenService.instance
-        if (screen == null && screenAtStart && p.getBoolean("pixels", true)) {
-            stopLoop("Screen reading stopped")
-            return
-        }
-        if (screen == null) {
-            if (!settleScroll(null, null)) return
-            choose(run, p, emptyList(), null)
-            return
-        }
-        screen.findBoxesWithProfile(dp(14), dp(48)) { found, profile ->
-            if (!alive(run)) return@findBoxesWithProfile
-            if (!settleScroll(screen, profile)) return@findBoxesWithProfile
-            choose(run, p, found.filter { !hitsBubble(it) }.map { it.toBox() }, screen)
-        }
-    }
-
-    /**
-     * WAITING_FOR_SCROLL -> FIND_TARGET. Moves the line up by how far the page actually
-     * moved, measured from the pictures either side of the scroll; without screen reading
-     * only the swipe's length is known.
-     */
-    private fun settleScroll(screen: ScreenService?, after: IntArray?): Boolean {
-        if (!scrollPending) return true
-        scrollPending = false
-
-        val before = profileBefore
-        profileBefore = null
-        lastMoved = if (screen != null && before != null && after != null) {
-            val expected = screen.screenToRows(swipePx)
-            val rows = Sequencer.measureShift(before, after, expected, expected * 2 + 20)
-            screen.rowsToScreen(rows)
-        } else {
-            swipePx
-        }
-        if (seq.scrolled(lastMoved)) return true
-        orderStop(TickState.FIND_TARGET)
-        return false
-    }
-
-    /**
-     * Picks the target: the first empty box below the line, named by the app when it names
-     * its boxes, seen in the scan otherwise. One of the two, never both.
-     */
-    private fun choose(run: Int, p: SharedPreferences, seen: List<Box>, screen: ScreenService?) {
-        val fromTree = treeBoxes(p, screen != null)
-        val treePick = seq.pick(fromTree.map { it.first })
-        if (treePick != null) {
-            val node = fromTree.first { it.first == treePick }.second
-            emptyScrolls = 0
-            tapNode(run, node, treePick, p)
+        if (!p.getBoolean("pixels", true) || screen == null) {
+            settleUp(null)
+            status("nothing in the tree, and screen reading is off")
+            scrollOn(p)
             return
         }
 
-        val pick = if (screen != null && p.getBoolean("pixels", true)) seq.pick(seen) else null
-        if (pick != null && screen != null) {
-            emptyScrolls = 0
-            tapBox(run, pick, p, screen)
-            return
-        }
+        screen.findBoxes(dp(14), dp(48)) { boxes ->
+            if (!looping) return@findBoxes
+            settleUp(boxes)
 
-        // Nothing below the line in this scan.
-        if (autoRun && seq.attempt == 0) {
-            stopLoop("Automatic: nothing to tick here")
-            return
-        }
-        if (scrolledOnce && lastMoved <= 0) {
-            stopLoop("Reached the end of the page")
-            return
-        }
-        emptyScrolls++
-        if (emptyScrolls > p.getInt("emptyScrolls", 6).coerceIn(1, 50)) {
-            stopLoop("Nothing left to tick")
-            return
-        }
-        status("nothing below the last box (${seen.size} seen) - scrolling on")
-        scrollOn(run, p)
-    }
-
-    /** TAPPING, for a box found in the scan: one gesture at its middle. */
-    private fun tapBox(run: Int, box: Box, p: SharedPreferences, screen: ScreenService) {
-        if (!seq.start(box)) {
-            orderStop(TickState.TAPPING)
-            return
-        }
-        currentNode = null
-        val ok = gestureTap(box.centerX.toFloat(), box.centerY.toFloat())
-        status("box ${seq.attempt}: tapped ${box.centerX},${box.centerY}" +
-                (if (ok) "" else " - gesture refused"))
-        main.postDelayed({
-            if (alive(run)) verifyBox(run, box, maxRetries(p), p, screen)
-        }, waitMs(p, "tickWaitMs", 300))
-    }
-
-    /**
-     * VERIFYING, by sight: only this box, only its patch of the picture. A sent gesture says
-     * nothing about the box, so the box itself is looked at.
-     *
-     * Still an empty box there: not ticked. It gets [retriesLeft] more looks, a moment apart,
-     * in case the screen was slow - looks, never taps: a second tap on a box that was only
-     * slow to show its tick would untick it.
-     *
-     * No empty box there: ticked - unless the pop-up is up, which may be lying over the box.
-     * Then the pop-up is tapped away and the box looked at once more before the result is
-     * recorded.
-     */
-    private fun verifyBox(
-        run: Int,
-        box: Box,
-        retriesLeft: Int,
-        p: SharedPreferences,
-        screen: ScreenService
-    ) {
-        if (!enter(TickState.VERIFYING)) return
-        screen.stillEmpty(box.toRect(), dp(14), dp(48)) { empty ->
-            if (!alive(run)) return@stillEmpty
-
-            if (empty) {
-                if (retriesLeft > 0) {
-                    status("box ${seq.attempt}: not ticked yet, looking again")
-                    main.postDelayed({
-                        if (alive(run)) verifyBox(run, box, retriesLeft - 1, p, screen)
-                    }, waitMs(p, "tickWaitMs", 300))
-                } else if (record(false)) {
-                    clearThenScroll(run, p)
-                }
-                return@stillEmpty
+            val box = boxes.firstOrNull { found ->
+                !hitsBubble(found) && tried.none { Rect.intersects(it, found) }
+            }
+            if (box == null) {
+                status("nothing new here (${boxes.size} seen) - scrolling on")
+                scrollOn(p)
+                return@findBoxes
             }
 
-            popupAt(p, screen) { popup ->
-                if (!alive(run)) return@popupAt
-                if (popup == null) {
-                    if (record(true)) clearThenScroll(run, p, popupGone = true)
-                    return@popupAt
-                }
-                gestureTap(popup.exactCenterX(), popup.exactCenterY())
-                status("box ${seq.attempt}: pop-up over the box - cleared it, looking again")
-                main.postDelayed({
-                    if (!alive(run)) return@postDelayed
-                    screen.stillEmpty(box.toRect(), dp(14), dp(48)) recheck@{ emptyAfter ->
-                        if (!alive(run)) return@recheck
-                        if (record(!emptyAfter)) clearThenScroll(run, p)
-                    }
-                }, waitMs(p, "clearWaitMs", 300))
-            }
-        }
-    }
+            attempts++
+            pendingBox = Rect(box)
+            pendingNode = null
+            pendingBefore = null
+            pendingNumber = attempts
+            tried.add(Rect(box))
 
-    /**
-     * TAPPING, for a box the app names: its own click, with a tap at its middle only if the
-     * click is refused.
-     */
-    private fun tapNode(run: Int, node: AccessibilityNodeInfo, box: Box, p: SharedPreferences) {
-        if (!seq.start(box)) {
-            orderStop(TickState.TAPPING)
-            return
-        }
-        currentNode = node
-        val before = if (node.isCheckable) node.isChecked else null
-        var ok = clickNode(node)
-        if (!ok) ok = gestureTap(node)
-        status("box ${seq.attempt}: clicked " +
-                (node.className ?: "a node").toString().substringAfterLast('.') +
-                (if (ok) "" else " - refused"))
-        main.postDelayed({
-            if (alive(run)) verifyNode(run, node, box, before, maxRetries(p), p)
-        }, waitMs(p, "tickWaitMs", 300))
-    }
-
-    /** VERIFYING, for a box the app names: the same node is asked whether it changed. */
-    private fun verifyNode(
-        run: Int,
-        node: AccessibilityNodeInfo,
-        box: Box,
-        before: Boolean?,
-        retriesLeft: Int,
-        p: SharedPreferences
-    ) {
-        // A node that never said it was a checkbox has no state to ask; it is looked at.
-        // (Such nodes are only chosen when screen reading is on - see treeBoxes.)
-        if (before == null) {
-            val screen = ScreenService.instance
-            if (screen != null) {
-                verifyBox(run, box, retriesLeft, p, screen)
-            } else {
-                stopLoop("Screen reading stopped")
-            }
-            return
-        }
-
-        if (!enter(TickState.VERIFYING)) return
-        if (stateChanged(node, before)) {
-            if (record(true)) clearThenScroll(run, p)
-        } else if (retriesLeft > 0) {
-            status("box ${seq.attempt}: not ticked yet, looking again")
+            val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+            if (ok) ticked++
+            status("box $attempts: tapped ${box.centerX()},${box.centerY()}" +
+                    (if (ok) "" else " - refused"))
             main.postDelayed({
-                if (alive(run)) verifyNode(run, node, box, before, retriesLeft - 1, p)
+                if (looping) afterTick { if (looping) scrollOn(prefs()) }
             }, waitMs(p, "tickWaitMs", 300))
-        } else if (record(false)) {
-            clearThenScroll(run, p)
         }
     }
 
-    /**
-     * RECORDING_RESULT. From here the box is settled - successful or not, it is behind the
-     * line and is never chosen again, whatever it looks like after the scroll.
-     */
-    private fun record(success: Boolean): Boolean {
-        val physical = seq.attempt
-        if (success) {
-            if (!seq.succeeded()) {
-                orderStop(TickState.RECORDING_RESULT)
-                return false
-            }
-            status("box $physical: ticked")
-        } else {
-            val shown = seq.failed()
-            if (shown == null) {
-                orderStop(TickState.RECORDING_RESULT)
-                return false
-            }
-            recordFailure(physical, shown)
-            status("box $physical: FAILED - listed as $shown")
-        }
-        currentNode = null
-        return true
-    }
-
-    /**
-     * Writes a failure down with both its numbers. The report reads by the shown number - the
-     * box's place once earlier failures are taken out - with the physical one alongside.
-     */
-    private fun recordFailure(physical: Int, shown: Int) {
-        if (!reportStarted) {
-            startFailedReport()
-            reportStarted = true
-        }
-        val line = if (physical == shown) "$shown\n" else "$shown   (physical box $physical)\n"
-        try {
-            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use { it.write(line.toByteArray()) }
-        } catch (e: Exception) {
-            android.util.Log.e("CheckboxTicker", "could not write the failure", e)
-        }
-        updatePanel()
-    }
-
-    /** Each run with a failure gets its own heading in the failed-box report. */
-    private fun startFailedReport() {
-        val stamp = java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.US)
-            .format(java.util.Date())
-        val heading = "--- run of $stamp: failed boxes, numbered with earlier failures " +
-                "taken out ---\n"
-        try {
-            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use { it.write(heading.toByteArray()) }
-        } catch (e: Exception) {
-            android.util.Log.e("CheckboxTicker", "could not start the report", e)
-        }
-    }
-
-    /** CLEARING_POPUP, then SCROLLING - after every box, failures included. */
-    private fun clearThenScroll(run: Int, p: SharedPreferences, popupGone: Boolean = false) {
-        if (!enter(TickState.CLEARING_POPUP)) return
-        if (popupGone) {
-            scrollOn(run, p)                      // just looked: there is no pop-up
-        } else {
-            clearPopup(run, p, 3) { scrollOn(run, p) }
-        }
-    }
-
-    /**
-     * Taps the pop-up's button and waits until it has gone. If it is still there after
-     * [triesLeft] taps the run stops: the next box must never be tapped under a pop-up.
-     */
-    private fun clearPopup(run: Int, p: SharedPreferences, triesLeft: Int, then: () -> Unit) {
-        val screen = ScreenService.instance
-        if (!p.getBoolean("tapColour", true) || screen == null) {
-            then()
-            return
-        }
-        popupAt(p, screen) { popup ->
-            if (!alive(run)) return@popupAt
-            if (popup == null) {
-                then()
-                return@popupAt
-            }
-            if (triesLeft <= 0) {
-                stopLoop("The pop-up would not clear")
-                return@popupAt
-            }
-            gestureTap(popup.exactCenterX(), popup.exactCenterY())
-            status("pop-up: tapped ${popup.centerX()},${popup.centerY()}")
-            main.postDelayed({
-                if (alive(run)) clearPopup(run, p, triesLeft - 1, then)
-            }, waitMs(p, "clearWaitMs", 300))
-        }
-    }
-
-    /** Finds the pop-up's button, if the pop-up is up. */
-    private fun popupAt(p: SharedPreferences, screen: ScreenService, done: (Rect?) -> Unit) {
-        if (!p.getBoolean("tapColour", true)) {
-            done(null)
-            return
-        }
-        screen.findColour(
-            p.getInt("colour", DEFAULT_COLOUR),
-            p.getInt("colourTol", 60).coerceIn(0, 200),
-            p.getInt("skipTopPct", 20).coerceIn(0, 90),
-            done
-        )
-    }
-
-    /**
-     * SCROLLING, then WAITING_FOR_SCROLL, then a fresh FIND_TARGET. A picture is taken just
-     * before the swipe, so the next scan can tell how far the page really moved.
-     */
-    private fun scrollOn(run: Int, p: SharedPreferences) {
-        if (!enter(TickState.SCROLLING)) return
-        currentNode = null
-        val mm = p.getInt("scrollMm", 20)
-        val screen = ScreenService.instance
-        val go = { before: IntArray? ->
-            if (alive(run)) {
-                profileBefore = before
-                status("scrolling $mm mm")
-                swipePx = scrollScreen(mm)
-                scrollPending = true
-                scrolledOnce = true
-                if (enter(TickState.WAITING_FOR_SCROLL)) {
-                    main.postDelayed({ findTarget(run) }, waitMs(p, "scrollWaitMs", 300))
-                }
-            }
-        }
-        if (screen == null) go(null) else screen.rowProfile { before -> go(before) }
-    }
-
-    private fun maxRetries(p: SharedPreferences) = p.getInt("maxRetries", 1).coerceIn(0, 5)
-
-    /**
-     * The boxes the tree names, each with its place on screen. With screen reading off, only
-     * nodes that report a checked state are offered: anything else could not be verified.
-     */
-    private fun treeBoxes(
-        p: SharedPreferences,
-        screenOn: Boolean
-    ): List<Pair<Box, AccessibilityNodeInfo>> {
-        if (!p.getBoolean("useTree", true)) return emptyList()
+    private fun treeTarget(p: SharedPreferences): AccessibilityNodeInfo? {
         val rules = Rules(
             onlyUnchecked = p.getBoolean("onlyUnchecked", true),
             switches = p.getBoolean("switches", true),
             radios = p.getBoolean("radios", false),
             loose = p.getBoolean("loose", true)
         )
-        val nodes = ArrayList<AccessibilityNodeInfo>()
-        for (root in roots()) collect(root, nodes, rules, 20)
-
-        val out = ArrayList<Pair<Box, AccessibilityNodeInfo>>()
-        for (node in nodes) {
-            if (!screenOn && !node.isCheckable) continue
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
-            // With no place on screen a node cannot be put in order against the line.
-            if (bounds.isEmpty) continue
-            out.add(bounds.toBox() to node)
+        val targets = ArrayList<AccessibilityNodeInfo>()
+        for (root in roots()) {
+            collect(root, targets, rules, 1)
+            if (targets.isNotEmpty()) break
         }
-        return out
+        return targets.firstOrNull()
     }
 
-    private fun Rect.toBox() = Box(left, top, right, bottom)
+    private fun tryNode(node: AccessibilityNodeInfo, p: SharedPreferences) {
+        attempts++
+        pendingBox = null
+        pendingNode = node
+        pendingBefore = if (node.isCheckable) node.isChecked else null
+        pendingNumber = attempts
 
-    private fun Box.toRect() = Rect(left, top, right, bottom)
+        var ok = clickNode(node)
+        if (!ok) ok = gestureTap(node)
+        if (ok) ticked++
+        status("box $attempts: clicked " +
+                (node.className ?: "a node").toString().substringAfterLast('.') +
+                (if (ok) "" else " - refused"))
+        main.postDelayed({
+            if (looping) afterTick { if (looping) scrollOn(prefs()) }
+        }, waitMs(p, "tickWaitMs", 300))
+    }
+
+    /**
+     * Did the box tried last time actually tick? A node says so itself; a box found by sight
+     * has failed when an empty box is still sitting where it was. Nothing waits on the answer:
+     * it falls out of the look this pass was taking anyway.
+     */
+    private fun settleUp(boxes: List<Rect>?) {
+        val node = pendingNode
+        val before = pendingBefore
+        val box = pendingBox
+        val number = pendingNumber
+        pendingNode = null
+        pendingBefore = null
+        pendingBox = null
+        pendingNumber = 0
+        if (number <= 0) return
+
+        val itFailed = when {
+            node != null && before != null -> !stateChanged(node, before)
+            box != null && boxes != null -> boxes.any { Rect.intersects(it, box) }
+            else -> false
+        }
+        if (itFailed) recordFailure(number)
+    }
+
+    /**
+     * Writes down a box that would not tick. It is shown by its place once the earlier
+     * failures are taken out of the list: boxes 5, 7 and 10 failing read as 5, 6 and 8.
+     */
+    private fun recordFailure(number: Int) {
+        val shown = number - failed.size
+        failed.add(shown)
+        try {
+            openFileOutput(FAILED_FILE, Context.MODE_APPEND).use {
+                it.write("box $number of the run, shown as $shown\n".toByteArray())
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("CheckboxTicker", "could not write the failure", e)
+        }
+        updatePanel()
+    }
+
+    private fun scrollOn(p: SharedPreferences) {
+        status("scrolling ${p.getInt("scrollMm", 20)} mm")
+        val moved = scrollScreen(p.getInt("scrollMm", 20))
+        // Boxes already tried travel up the screen with the page, so they stay recognised
+        // after the scroll and are never given a second go.
+        shiftTried(moved)
+        lastBox = null
+        main.postDelayed({ step() }, waitMs(p, "scrollWaitMs", 300))
+    }
+
+    private fun shiftTried(moved: Int) {
+        if (moved <= 0) return
+        for (rect in tried) rect.offset(0, -moved)
+        tried.removeAll { it.bottom <= 0 }
+        pendingBox?.offset(0, -moved)
+    }
 
     /** A short, controlled swipe up, so the page moves on by about [mm] millimetres. */
     private fun scrollScreen(mm: Int): Int {
@@ -624,10 +382,10 @@ class CheckboxService : AccessibilityService() {
             return
         }
         val view = ensurePanel() ?: return
-        val tally = if (seq.failures.isEmpty()) {
+        val tally = if (failed.isEmpty()) {
             "none failed"
         } else {
-            "failed ${seq.failures.size}: " + seq.failures.joinToString(", ") { it.shown.toString() }
+            "failed ${failed.size}: " + failed.joinToString(", ")
         }
         view.text = "$lastStatus\n$tally"
     }
@@ -688,6 +446,175 @@ class CheckboxService : AccessibilityService() {
             where[0] + view.width + pad, where[1] + view.height + pad
         )
         return Rect.intersects(mine, box)
+    }
+
+    /**
+     * The fallback that needs no accessibility tree at all: take a picture of the screen,
+     * find the empty boxes on it, and tap where they are.
+     */
+    private fun tickByPixels(fromAuto: Boolean) {
+        val screen = ScreenService.instance
+        if (screen == null) {
+            if (!fromAuto) toast("Turn on screen reading in the app first")
+            return
+        }
+
+        running = true
+        silentRun = fromAuto
+        updateBubble()
+
+        // A pop-up after every tick can move the rest of the page, so in that mode the
+        // screen is looked at again before each box instead of trusting the first picture.
+        if (popupExpected()) oneAtATime(0, null) else allAtOnce(fromAuto)
+    }
+
+    private fun popupExpected() =
+        prefs().getBoolean("tapColour", true) && ScreenService.instance != null
+
+    private fun allAtOnce(fromAuto: Boolean) {
+        val screen = ScreenService.instance ?: return finishRun(0)
+        bubble?.visibility = View.INVISIBLE   // keep our own button out of the picture
+        main.postDelayed({
+            screen.findBoxes(dp(14), dp(48)) { boxes ->
+                bubble?.visibility = View.VISIBLE
+                if (boxes.isEmpty()) {
+                    running = false
+                    updateBubble()
+                    if (!fromAuto) toast("No empty box found on the screen")
+                } else {
+                    showMarkers(boxes)
+                    val gap = prefs().getInt("gapMs", 250).coerceIn(0, 5000)
+                    tapNext(boxes, 0, gap, 0)
+                }
+            }
+        }, 150L)
+    }
+
+    private fun tapNext(boxes: List<Rect>, i: Int, gap: Int, done: Int) {
+        if (i >= boxes.size) {
+            finishRun(done)
+            return
+        }
+        val box = boxes[i]
+        val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+        main.postDelayed(
+            { afterTick { tapNext(boxes, i + 1, gap, done + if (ok) 1 else 0) } },
+            gap.toLong().coerceAtLeast(60L)
+        )
+    }
+
+    /**
+     * Tick one box, deal with its pop-up, look at the screen again, tick the next. A ticked
+     * box stops looking empty, so it drops out of the next look by itself; [last] only
+     * guards against a box that refuses to be ticked holding the run up for ever.
+     */
+    private fun oneAtATime(done: Int, last: Rect?) {
+        val screen = ScreenService.instance ?: return finishRun(done)
+        val p = prefs()
+        val max = p.getInt("maxTicks", 50).coerceIn(1, 500)
+        if (done >= max) {
+            finishRun(done)
+            return
+        }
+
+        bubble?.visibility = View.INVISIBLE
+        main.postDelayed({
+            screen.findBoxes(dp(14), dp(48)) { boxes ->
+                bubble?.visibility = View.VISIBLE
+                val box = boxes.firstOrNull { it != last }
+                if (box == null) {
+                    finishRun(done)
+                } else {
+                    showMarkers(listOf(box))
+                    val ok = gestureTap(box.exactCenterX(), box.exactCenterY())
+                    val gap = p.getInt("gapMs", 250).coerceIn(0, 5000).toLong().coerceAtLeast(60L)
+                    main.postDelayed(
+                        { afterTick { oneAtATime(done + if (ok) 1 else 0, box) } },
+                        gap
+                    )
+                }
+            }
+        }, 150L)
+    }
+
+    private fun finishRun(done: Int) {
+        running = false
+        lastAutoRun = SystemClock.uptimeMillis()
+        updateBubble()
+        if (!silentRun || done > 0) {
+            toast(if (done == 0) "No empty box found on the screen" else "Ticked $done on screen")
+        }
+    }
+
+    /**
+     * Some apps answer a tick with a pop-up that has to be dealt with before the next box
+     * can be ticked. This waits for it, taps the coloured button in it, and only then lets
+     * the run carry on. The top slice of the screen is left alone throughout, so a coloured
+     * status bar or header is never mistaken for the button.
+     */
+    private fun afterTick(next: () -> Unit) {
+        val p = prefs()
+        val screen = ScreenService.instance
+        if (!p.getBoolean("tapColour", true) || screen == null) {
+            next()
+            return
+        }
+
+        val colour = p.getInt("colour", DEFAULT_COLOUR)
+        val tolerance = p.getInt("colourTol", 60).coerceIn(0, 200)
+        val skipTop = p.getInt("skipTopPct", 20).coerceIn(0, 90)
+
+        // The pop-up has already had the after-a-tick wait to appear.
+        screen.findColour(colour, tolerance, skipTop) { box ->
+            if (box == null) {
+                status("pop-up: no ${String.format("#%06X", colour)} below the top $skipTop%")
+                next()
+            } else {
+                showMarkers(listOf(box))
+                gestureTap(box.exactCenterX(), box.exactCenterY())
+                status("pop-up: tapped ${box.centerX()},${box.centerY()}")
+                main.postDelayed({ next() }, waitMs(p, "clearWaitMs", 300))
+            }
+        }
+    }
+
+    /** Flashes a ring round everything the screen scan found, so it is clear what was tapped. */
+    private fun showMarkers(boxes: List<Rect>) {
+        // A ring is a square outline with a flat middle, which is exactly what the scanner
+        // looks for, so during a run it would photograph its own markers and tap those.
+        if (looping) return
+        val manager = windowManager ?: return
+        val view = MarkerView(this, boxes)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        try {
+            manager.addView(view, params)
+        } catch (e: Exception) {
+            return
+        }
+        main.postDelayed({
+            try { manager.removeView(view) } catch (e: Exception) { }
+        }, 1200L)
+    }
+
+    private class MarkerView(ctx: Context, private val boxes: List<Rect>) : View(ctx) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+            color = Color.argb(235, 0, 200, 90)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            for (box in boxes) canvas.drawRect(box, paint)
+        }
     }
 
     /**
@@ -801,6 +728,30 @@ class CheckboxService : AccessibilityService() {
         val desc = node.contentDescription ?: ""
         val state = if (Build.VERSION.SDK_INT >= 30) node.stateDescription ?: "" else ""
         return "$text $desc $state".lowercase()
+    }
+
+    private fun tickNext(targets: List<AccessibilityNodeInfo>, i: Int, gap: Int, done: Int) {
+        if (i >= targets.size) {
+            running = false
+            lastAutoRun = SystemClock.uptimeMillis()
+            updateBubble()
+            if (!silentRun || done > 0) {
+                toast(if (done == 0) "Nothing could be ticked" else "Ticked $done")
+            }
+            return
+        }
+
+        val node = targets[i]
+        val before = if (node.isCheckable) node.isChecked else null
+        var ok = clickNode(node)
+        if (!ok) ok = gestureTap(node)
+
+        main.postDelayed({
+            var worked = ok
+            // A web page can swallow the click, so make sure the box really changed.
+            if (ok && before != null && !stateChanged(node, before)) worked = gestureTap(node)
+            afterTick { tickNext(targets, i + 1, gap, done + if (worked) 1 else 0) }
+        }, gap.toLong().coerceAtLeast(60L))
     }
 
     private fun stateChanged(node: AccessibilityNodeInfo, before: Boolean): Boolean = try {

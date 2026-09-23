@@ -36,9 +36,6 @@ class MainActivity : Activity() {
     private lateinit var auto: CheckBox
     private lateinit var pixels: CheckBox
     private lateinit var showStatus: CheckBox
-    private lateinit var retriesInput: EditText
-    private lateinit var failStreakInput: EditText
-    private lateinit var useTree: CheckBox
     private lateinit var tapColour: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
@@ -106,24 +103,6 @@ class MainActivity : Activity() {
         root.addView(label("Gap between taps (ms)"))
         gapInput = number(p.getInt("gapMs", 250))
         root.addView(gapInput)
-
-        useTree = check("Use the app's own checkboxes when it publishes them",
-            p.getBoolean("useTree", true))
-        root.addView(useTree)
-        root.addView(note("Off means the screen is always read instead. Turn it off if the app " +
-                "offers something that looks like a checkbox but never ticks."))
-
-        root.addView(label("Extra looks before a box is recorded as failed"))
-        retriesInput = number(p.getInt("maxRetries", 1))
-        root.addView(retriesInput)
-        root.addView(note("Each box is tapped once. If it still looks empty it is looked at " +
-                "again this many times, a moment apart, in case the screen was slow - then it " +
-                "is recorded as failed and the run moves on to the next box. It is never " +
-                "tapped twice: a second tap on a box that was only slow would untick it."))
-
-        root.addView(label("Stop after this many failures in a row"))
-        failStreakInput = number(p.getInt("maxFailStreak", 5))
-        root.addView(failStreakInput)
 
         root.addView(label("Most boxes in one run"))
         maxInput = number(p.getInt("maxTicks", 50))
@@ -237,9 +216,6 @@ class MainActivity : Activity() {
             .putBoolean("auto", auto.isChecked)
             .putBoolean("pixels", pixels.isChecked)
             .putBoolean("showStatus", showStatus.isChecked)
-            .putBoolean("useTree", useTree.isChecked)
-            .putInt("maxRetries", retriesInput.text.toString().toIntOrNull()?.coerceIn(0, 5) ?: 1)
-            .putInt("maxFailStreak", failStreakInput.text.toString().toIntOrNull()?.coerceIn(1, 100) ?: 5)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
             .putBoolean("tapColour", tapColour.isChecked)
@@ -289,7 +265,7 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
         AlertDialog.Builder(this)
-            .setTitle("Failed boxes (earlier failures taken out)")
+            .setTitle("Failed boxes")
             .setView(ScrollView(this).apply { addView(body) })
             .setPositiveButton("Share") { _, _ ->
                 val send = Intent(Intent.ACTION_SEND).apply {
