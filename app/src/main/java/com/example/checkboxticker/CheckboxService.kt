@@ -62,6 +62,7 @@ class CheckboxService : AccessibilityService() {
     private val failed = ArrayList<Int>()         // their places once earlier failures are out
     private val candidates = Candidates()         // this screen's boxes, and the ones done with
     private var nodeTaps = 0                      // tries at the box the tree is offering
+    private val failedNodes = ArrayList<Rect>()   // tree boxes given up on, by where they are
     private var emptyScrolls = 0
     private var knownWidth = 0
     private var knownHeight = 0
@@ -177,6 +178,7 @@ class CheckboxService : AccessibilityService() {
         attempts = 0
         failed.clear()
         candidates.clear()
+        failedNodes.clear()
         nodeTaps = 0
         emptyScrolls = 0
         toast("Running - press STOP to finish")
@@ -261,6 +263,7 @@ class CheckboxService : AccessibilityService() {
             knownWidth = w
             knownHeight = h
             candidates.clear()
+            failedNodes.clear()
         }
     }
 
@@ -309,7 +312,14 @@ class CheckboxService : AccessibilityService() {
         status("box ${candidate.number}: will not tick, moving on")
     }
 
+    /**
+     * The first box the tree offers that has not already been given up on. Without that
+     * exclusion a node that never changes stays first for ever and the run never gets past
+     * it - which is also why several are collected rather than one.
+     */
     private fun treeTarget(p: SharedPreferences): AccessibilityNodeInfo? {
+        if (!p.getBoolean("useTree", true)) return null
+
         val rules = Rules(
             onlyUnchecked = p.getBoolean("onlyUnchecked", true),
             switches = p.getBoolean("switches", true),
@@ -318,10 +328,20 @@ class CheckboxService : AccessibilityService() {
         )
         val targets = ArrayList<AccessibilityNodeInfo>()
         for (root in roots()) {
-            collect(root, targets, rules, 1)
+            collect(root, targets, rules, 12)
             if (targets.isNotEmpty()) break
         }
-        return targets.firstOrNull()
+
+        for (node in targets) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            // A node with no place on screen cannot be told apart from the next one, and
+            // cannot be checked afterwards either, so it is left to the picture instead.
+            if (bounds.isEmpty) continue
+            if (failedNodes.any { Candidates.near(it, bounds, tolerance()) }) continue
+            return node
+        }
+        return null
     }
 
     /**
@@ -354,6 +374,9 @@ class CheckboxService : AccessibilityService() {
                     status("box $number: no change, one more try")
                 } else {
                     nodeTaps = 0
+                    val bounds = Rect()
+                    node.getBoundsInScreen(bounds)
+                    if (!bounds.isEmpty) failedNodes.add(bounds)
                     recordFailure(number)
                     status("box $number: will not tick, moving on")
                 }
@@ -402,6 +425,8 @@ class CheckboxService : AccessibilityService() {
                 val usable = found.filter { !hitsBubble(it) }
                 val moved = Candidates.measureShift(anchors, usable, expected, tolerance())
                 candidates.shift(moved)
+                for (rect in failedNodes) rect.offset(0, moved)
+                failedNodes.removeAll { it.bottom <= 0 }
                 candidates.refill(usable, tolerance())
 
                 val pick = candidates.next(maxRetries(p))

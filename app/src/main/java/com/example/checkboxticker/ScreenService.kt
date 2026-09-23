@@ -240,7 +240,8 @@ class ScreenService : Service() {
 
         val wantX = (region.exactCenterX() * sx - left).toInt()
         val wantY = (region.exactCenterY() * sy - top).toInt()
-        val slack = (maxScreenPx * sx).toInt().coerceAtLeast(6)
+        // Half a box, so the box next door cannot be mistaken for this one still being empty.
+        val slack = (maxScreenPx * sx / 2).toInt().coerceAtLeast(6)
 
         return BoxFinder.find(lum, w, h, (minScreenPx * sx).toInt(), (maxScreenPx * sx).toInt())
             .any { box ->

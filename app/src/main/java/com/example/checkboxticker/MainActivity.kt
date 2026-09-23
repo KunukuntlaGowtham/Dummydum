@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private lateinit var pixels: CheckBox
     private lateinit var showStatus: CheckBox
     private lateinit var retriesInput: EditText
+    private lateinit var useTree: CheckBox
     private lateinit var tapColour: CheckBox
     private lateinit var colourInput: EditText
     private lateinit var tolInput: EditText
@@ -104,6 +105,12 @@ class MainActivity : Activity() {
         root.addView(label("Gap between taps (ms)"))
         gapInput = number(p.getInt("gapMs", 250))
         root.addView(gapInput)
+
+        useTree = check("Use the app's own checkboxes when it publishes them",
+            p.getBoolean("useTree", true))
+        root.addView(useTree)
+        root.addView(note("Off means the screen is always read instead. Turn it off if the app " +
+                "offers something that looks like a checkbox but never ticks."))
 
         root.addView(label("Tries before a box is given up on"))
         retriesInput = number(p.getInt("maxRetries", 1))
@@ -223,6 +230,7 @@ class MainActivity : Activity() {
             .putBoolean("auto", auto.isChecked)
             .putBoolean("pixels", pixels.isChecked)
             .putBoolean("showStatus", showStatus.isChecked)
+            .putBoolean("useTree", useTree.isChecked)
             .putInt("maxRetries", retriesInput.text.toString().toIntOrNull()?.coerceIn(0, 5) ?: 1)
             .putInt("gapMs", gapInput.text.toString().toIntOrNull()?.coerceIn(0, 5000) ?: 250)
             .putInt("maxTicks", maxInput.text.toString().toIntOrNull()?.coerceIn(1, 500) ?: 50)
