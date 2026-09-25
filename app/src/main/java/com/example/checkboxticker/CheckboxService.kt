@@ -42,7 +42,6 @@ class CheckboxService : AccessibilityService() {
         const val REPORT_FILE = "scan_report.txt"
         const val FAILED_FILE = "failed.txt"
         const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
-        const val OVERLAY_GONE_MS = 120L           // for the screen to redraw without our panel
         @Volatile
         var instance: CheckboxService? = null
     }
@@ -224,13 +223,10 @@ class CheckboxService : AccessibilityService() {
             return
         }
         status("snap")
-        hideOverlays()
-        main.postDelayed({
-            screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
-                showOverlays()
-                if (looping) numberBoxes(boxes, sketch)
-            }
-        }, OVERLAY_GONE_MS)
+        screen.freshBoxes(dp(14), dp(48), true, ownWindows(), { hideOverlays() }) { boxes, sketch ->
+            showOverlays()
+            if (looping) numberBoxes(boxes, sketch)
+        }
     }
 
     /** Numbers the new boxes of a snap, top to bottom, and starts ticking them. */
@@ -287,13 +283,10 @@ class CheckboxService : AccessibilityService() {
             return
         }
         status("checking")
-        hideOverlays()
-        main.postDelayed({
-            screen.findBoxes(dp(14), dp(48)) { boxes ->
-                showOverlays()
-                if (looping) judgeSnap(boxes)
-            }
-        }, OVERLAY_GONE_MS)
+        screen.freshBoxes(dp(14), dp(48), false, emptyList(), { hideOverlays() }) { boxes, _ ->
+            showOverlays()
+            if (looping) judgeSnap(boxes)
+        }
     }
 
     /** Boxes still empty where they were did not tick; then on to the next screen. */
@@ -360,43 +353,67 @@ class CheckboxService : AccessibilityService() {
     private fun scrollBy(distance: Int) {
         if (!looping) return
         status("scrolling")
-        swipeUp(distance)
         scrolledOnce = true
         lastBox = null
-        main.postDelayed({ snap() }, waitMs(prefs(), "scrollWaitMs", 300) + 400L)
+        // The wait for the page to settle starts when the finger has lifted - on a slow phone
+        // that is well after the swipe was sent.
+        swipeUp(distance) {
+            main.postDelayed({ snap() }, waitMs(prefs(), "scrollWaitMs", 300))
+        }
     }
 
     /**
      * Moves the page up by [distance] pixels: a steady drag, then the finger held still for a
      * moment before it lifts, so the page does not fling on past boxes nobody has seen.
      */
-    private fun swipeUp(distance: Int) {
+    private fun swipeUp(distance: Int, then: () -> Unit) {
         val metrics = resources.displayMetrics
         val x = metrics.widthPixels / 2f
         val from = metrics.heightPixels * 0.85f
         val to = (from - distance).coerceAtLeast(metrics.heightPixels * 0.1f)
+
+        // Carry on exactly once: when the finger lifts, if Android drops the gesture, or - in
+        // case neither is ever reported - after a few seconds.
+        var finished = false
+        val finish = {
+            if (!finished) {
+                finished = true
+                then()
+            }
+        }
+        main.postDelayed({ finish() }, 4000L)
+        val done = object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) = finish()
+            override fun onCancelled(gestureDescription: GestureDescription?) = finish()
+        }
         try {
             val path = Path().apply { moveTo(x, from); lineTo(x, to) }
             val drag = GestureDescription.StrokeDescription(path, 0L, 500L, true)
-            dispatchGesture(
+            val sent = dispatchGesture(
                 GestureDescription.Builder().addStroke(drag).build(),
                 object : AccessibilityService.GestureResultCallback() {
                     override fun onCompleted(gestureDescription: GestureDescription?) {
                         try {
                             val hold = Path().apply { moveTo(x, to) }
                             val still = drag.continueStroke(hold, 0L, 200L, false)
-                            dispatchGesture(
-                                GestureDescription.Builder().addStroke(still).build(), null, null
-                            )
+                            if (!dispatchGesture(
+                                    GestureDescription.Builder().addStroke(still).build(), done, null
+                                )
+                            ) finish()
                         } catch (e: Exception) {
                             android.util.Log.e("CheckboxTicker", "hold failed", e)
+                            finish()
                         }
                     }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) = finish()
                 },
                 null
             )
+            if (!sent) finish()
         } catch (e: Exception) {
             android.util.Log.e("CheckboxTicker", "scroll failed", e)
+            finish()
         }
     }
 

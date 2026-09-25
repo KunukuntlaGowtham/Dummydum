@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.WindowManager
 
@@ -39,6 +40,9 @@ class ScreenService : Service() {
          * this, so a checkbox and the words beside it come out the same size on any phone.
          */
         const val PX_PER_DP = 1.3125f
+
+        /** How long a fresh snap waits for a new picture before taking the screen as unchanged. */
+        const val FRESH_WAIT_MS = 900L
 
         @Volatile
         var instance: ScreenService? = null
@@ -252,6 +256,59 @@ class ScreenService : Service() {
         return BoxLook.Sketch(cells, cols, rows, pxPerCol, pxPerRow)
     }
 
+    /**
+     * A snap that is sure to show the screen as it is now - after a scroll has settled, on
+     * any phone, however slowly it hands over its pictures:
+     *
+     * 1. Whatever picture is waiting is older than this request, so it only becomes the
+     *    last-known screen.
+     * 2. [beforeCapture] runs on the main thread - hiding our see-through panel changes the
+     *    screen, which makes Android send a new picture.
+     * 3. The newest picture that arrives within [FRESH_WAIT_MS] is used. Only when none comes
+     *    at all - nothing on screen changed - is the last-known one used.
+     *
+     * [done] gets the empty boxes (in screen pixels) and, with [withSketch], the sketch.
+     */
+    fun freshBoxes(
+        minScreenPx: Int,
+        maxScreenPx: Int,
+        withSketch: Boolean,
+        skip: List<Rect>,
+        beforeCapture: () -> Unit,
+        done: (List<Rect>, BoxLook.Sketch?) -> Unit
+    ) {
+        worker.post {
+            var boxes: List<Rect> = emptyList()
+            var sketch: BoxLook.Sketch? = null
+            try {
+                val imageReader = reader
+                if (imageReader != null) {
+                    imageReader.acquireLatestImage()?.let { decode(it) }
+                    val shown = java.util.concurrent.CountDownLatch(1)
+                    main.post {
+                        try { beforeCapture() } finally { shown.countDown() }
+                    }
+                    shown.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    Thread.sleep(60)            // let the screen redraw once without our panel
+                    var image = imageReader.acquireLatestImage()
+                    val until = SystemClock.uptimeMillis() + FRESH_WAIT_MS
+                    while (image == null && SystemClock.uptimeMillis() < until) {
+                        Thread.sleep(16)
+                        image = imageReader.acquireLatestImage()
+                    }
+                    val frame = if (image != null) decode(image) else lastFrame
+                    if (frame != null) {
+                        boxes = detectIn(frame, (minScreenPx / scale).toInt(), (maxScreenPx / scale).toInt())
+                        if (withSketch) sketch = sketchOf(frame, skip)
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "fresh snap failed", t)
+            }
+            main.post { done(boxes, sketch) }
+        }
+    }
+
     /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
     fun findColour(target: Int, tolerance: Int, skipTopPct: Int, done: (Rect?) -> Unit) {
         worker.post {
@@ -310,7 +367,11 @@ class ScreenService : Service() {
         // Android sends a new picture only when something on screen changes, so no new one
         // means the last picture is still what is on screen.
         if (image == null) return known
+        return decode(image)
+    }
 
+    /** Turns one picture from Android into plain colours, and keeps it as the latest. */
+    private fun decode(image: android.media.Image): Frame {
         try {
             val plane = image.planes[0]
             val buffer = plane.buffer
