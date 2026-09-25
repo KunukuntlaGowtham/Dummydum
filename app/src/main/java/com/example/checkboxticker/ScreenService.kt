@@ -22,6 +22,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.WindowManager
+import kotlin.math.abs
 
 /**
  * Reads the screen so checkboxes can be found by how they look, for apps that publish no
@@ -34,15 +35,11 @@ class ScreenService : Service() {
     companion object {
         const val TAG = "CheckboxTicker"
         const val CHANNEL = "ticker"
-        /**
-         * Picture pixels per dp that finding and recognising boxes are tuned for - what a
-         * full-HD phone read at half size gives. Every phone is read at the size that gives
-         * this, so a checkbox and the words beside it come out the same size on any phone.
-         */
-        const val PX_PER_DP = 1.3125f
-
-        /** How long a fresh snap waits for a new picture before taking the screen as unchanged. */
-        const val FRESH_WAIT_MS = 900L
+        const val SCALE = 2          // work on a half-size copy of the screen
+        const val POLL_MS = 30L          // how often to look at the newest picture
+        const val QUIET_MS = 100L        // no new picture this long: nothing is moving
+        const val POPUP_SAMPLES = 150    // this many more sampled points of colour: a pop-up
+        const val CELL = 4           // pixels per cell across, in a sketch
 
         @Volatile
         var instance: ScreenService? = null
@@ -57,16 +54,6 @@ class ScreenService : Service() {
     private var reader: ImageReader? = null
     private var screenW = 0
     private var screenH = 0
-
-    /**
-     * How much smaller than the screen the pictures are: whatever brings them to
-     * [PX_PER_DP], never larger than the screen itself. Tested on real pictures of the form,
-     * reading at full size on a full-HD phone found fewer boxes, not more - the finder wants
-     * the same detail on every phone, not the most.
-     */
-    @Volatile
-    private var scale = 2f
-    private var density = 2.625f
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -137,11 +124,9 @@ class ScreenService : Service() {
         }
         screenW = size.x
         screenH = size.y
-        density = resources.displayMetrics.density
-        scale = maxOf(1f, density / PX_PER_DP)
 
-        val w = Math.round(screenW / scale)
-        val h = Math.round(screenH / scale)
+        val w = screenW / SCALE
+        val h = screenH / SCALE
         val manager = getSystemService(MediaProjectionManager::class.java)
         val proj = manager.getMediaProjection(code, data)
         projection = proj
@@ -156,7 +141,7 @@ class ScreenService : Service() {
         val imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         reader = imageReader
         display = proj.createVirtualDisplay(
-            "ticker", w, h, maxOf(1, Math.round(resources.displayMetrics.densityDpi / scale)),
+            "ticker", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.surface, null, worker
         )
     }
@@ -178,7 +163,7 @@ class ScreenService : Service() {
     fun findBoxes(minScreenPx: Int, maxScreenPx: Int, done: (List<Rect>) -> Unit) {
         worker.post {
             val boxes = try {
-                detect((minScreenPx / scale).toInt(), (maxScreenPx / scale).toInt())
+                detect(minScreenPx / SCALE, maxScreenPx / SCALE)
             } catch (t: Throwable) {
                 Log.e(TAG, "screen scan failed", t)
                 emptyList()
@@ -204,7 +189,7 @@ class ScreenService : Service() {
             try {
                 val frame = grab()
                 if (frame != null) {
-                    boxes = detectIn(frame, (minScreenPx / scale).toInt(), (maxScreenPx / scale).toInt())
+                    boxes = detectIn(frame, minScreenPx / SCALE, maxScreenPx / SCALE)
                     sketch = sketchOf(frame, skip)
                 }
             } catch (t: Throwable) {
@@ -215,98 +200,43 @@ class ScreenService : Service() {
     }
 
     /**
-     * A grey copy of the screen in cells of about 3 x 0.75 dp, whatever the phone, each the
-     * average brightness of the picture pixels it covers. Our own windows - whose text changes
-     * from one snap to the next - are marked [BoxLook.SKIP].
+     * Every row of the screen, each cell the average brightness of [CELL] pixels side by
+     * side. Our own windows - whose text changes from one snap to the next - are marked
+     * [BoxLook.SKIP].
      */
     private fun sketchOf(frame: Frame, skip: List<Rect>): BoxLook.Sketch {
-        val sw = if (screenW > 0) screenW else Math.round(frame.w * scale)
-        val sh = if (screenH > 0) screenH else Math.round(frame.h * scale)
-        val framePxPerDp = density * frame.w / sw
-        val cw = maxOf(1, Math.round(3.05f * framePxPerDp))
-        val ch = maxOf(1, Math.round(0.76f * framePxPerDp))
-        val cols = frame.w / cw
-        val rows = frame.h / ch
+        val cols = frame.w / CELL
+        val rows = frame.h
         val cells = IntArray(cols * rows)
         for (y in 0 until rows) {
+            val row = y * frame.w
             for (cx in 0 until cols) {
                 var sum = 0
-                for (yy in y * ch until y * ch + ch) {
-                    val row = yy * frame.w
-                    for (x in cx * cw until cx * cw + cw) {
-                        val c = frame.rgb[row + x]
-                        sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
-                                (c and 0xff) * 114) / 1000
-                    }
+                val x0 = cx * CELL
+                for (x in x0 until x0 + CELL) {
+                    val c = frame.rgb[row + x]
+                    sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
+                            (c and 0xff) * 114) / 1000
                 }
-                cells[y * cols + cx] = sum / (cw * ch)
+                cells[y * cols + cx] = sum / CELL
             }
         }
-        val pxPerCol = sw.toFloat() / cols
-        val pxPerRow = sh.toFloat() / rows
+        val sw = if (screenW > 0) screenW else frame.w * SCALE
+        val sh = if (screenH > 0) screenH else frame.h * SCALE
         for (r in skip) {
-            val left = (r.left / pxPerCol).toInt().coerceIn(0, cols)
-            val right = (r.right / pxPerCol + 1).toInt().coerceIn(0, cols)
-            val top = (r.top / pxPerRow).toInt().coerceIn(0, rows)
-            val bottom = (r.bottom / pxPerRow + 1).toInt().coerceIn(0, rows)
+            val left = (r.left.toLong() * frame.w / sw / CELL).toInt().coerceIn(0, cols)
+            val right = ((r.right.toLong() * frame.w / sw + CELL - 1) / CELL).toInt().coerceIn(0, cols)
+            val top = (r.top.toLong() * rows / sh).toInt().coerceIn(0, rows)
+            val bottom = (r.bottom.toLong() * rows / sh + 1).toInt().coerceIn(0, rows)
             for (y in top until bottom) {
                 for (x in left until right) cells[y * cols + x] = BoxLook.SKIP
             }
         }
-        return BoxLook.Sketch(cells, cols, rows, pxPerCol, pxPerRow)
-    }
-
-    /**
-     * A snap that is sure to show the screen as it is now - after a scroll has settled, on
-     * any phone, however slowly it hands over its pictures:
-     *
-     * 1. Whatever picture is waiting is older than this request, so it only becomes the
-     *    last-known screen.
-     * 2. [beforeCapture] runs on the main thread - hiding our see-through panel changes the
-     *    screen, which makes Android send a new picture.
-     * 3. The newest picture that arrives within [FRESH_WAIT_MS] is used. Only when none comes
-     *    at all - nothing on screen changed - is the last-known one used.
-     *
-     * [done] gets the empty boxes (in screen pixels) and, with [withSketch], the sketch.
-     */
-    fun freshBoxes(
-        minScreenPx: Int,
-        maxScreenPx: Int,
-        withSketch: Boolean,
-        skip: List<Rect>,
-        beforeCapture: () -> Unit,
-        done: (List<Rect>, BoxLook.Sketch?) -> Unit
-    ) {
-        worker.post {
-            var boxes: List<Rect> = emptyList()
-            var sketch: BoxLook.Sketch? = null
-            try {
-                val imageReader = reader
-                if (imageReader != null) {
-                    imageReader.acquireLatestImage()?.let { decode(it) }
-                    val shown = java.util.concurrent.CountDownLatch(1)
-                    main.post {
-                        try { beforeCapture() } finally { shown.countDown() }
-                    }
-                    shown.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    Thread.sleep(60)            // let the screen redraw once without our panel
-                    var image = imageReader.acquireLatestImage()
-                    val until = SystemClock.uptimeMillis() + FRESH_WAIT_MS
-                    while (image == null && SystemClock.uptimeMillis() < until) {
-                        Thread.sleep(16)
-                        image = imageReader.acquireLatestImage()
-                    }
-                    val frame = if (image != null) decode(image) else lastFrame
-                    if (frame != null) {
-                        boxes = detectIn(frame, (minScreenPx / scale).toInt(), (maxScreenPx / scale).toInt())
-                        if (withSketch) sketch = sketchOf(frame, skip)
-                    }
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "fresh snap failed", t)
-            }
-            main.post { done(boxes, sketch) }
-        }
+        return BoxLook.Sketch(
+            cells, cols, rows,
+            pxPerCol = sw.toFloat() * CELL / frame.w,
+            pxPerRow = sh.toFloat() / rows
+        )
     }
 
     /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
@@ -319,7 +249,7 @@ class ScreenService : Service() {
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
                     BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
-                        ?.let { toScreen(it, frame) }
+                        ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "colour scan failed", t)
@@ -330,21 +260,6 @@ class ScreenService : Service() {
     }
 
     private class Frame(val rgb: IntArray, val w: Int, val h: Int)
-
-    /**
-     * A place on the picture, in screen pixels - by the real ratio of the two sizes, not an
-     * assumed x2, so it lands exactly on any screen.
-     */
-    private fun toScreen(r: Rect, frame: Frame): Rect {
-        val sw = if (screenW > 0) screenW else Math.round(frame.w * scale)
-        val sh = if (screenH > 0) screenH else Math.round(frame.h * scale)
-        return Rect(
-            (r.left.toLong() * sw / frame.w).toInt(),
-            (r.top.toLong() * sh / frame.h).toInt(),
-            (r.right.toLong() * sw / frame.w).toInt(),
-            (r.bottom.toLong() * sh / frame.h).toInt()
-        )
-    }
 
     /** The last picture taken - still the screen, until Android sends a new one. */
     @Volatile
@@ -370,24 +285,36 @@ class ScreenService : Service() {
         return decode(image)
     }
 
+    // Pictures are decoded into the same few arrays over and over: on a low-end phone making
+    // new ones for every picture keeps the phone busy clearing up after them.
+    private var bytes = ByteArray(0)
+    private val rgbArrays = arrayOfNulls<IntArray>(2)
+    private var nextArray = 0
+
     /** Turns one picture from Android into plain colours, and keeps it as the latest. */
     private fun decode(image: android.media.Image): Frame {
         try {
             val plane = image.planes[0]
             val buffer = plane.buffer
-            val bytes = ByteArray(buffer.remaining())
+            val size = buffer.remaining()
+            if (bytes.size != size) bytes = ByteArray(size)
             buffer.get(bytes)
             val rowStride = plane.rowStride
             val pixelStride = plane.pixelStride
             val w = image.width
             val h = image.height
 
-            val rgb = IntArray(w * h)
+            var rgb = rgbArrays[nextArray]
+            if (rgb == null || rgb.size != w * h) {
+                rgb = IntArray(w * h)
+                rgbArrays[nextArray] = rgb
+            }
+            nextArray = 1 - nextArray
             for (y in 0 until h) {
                 var i = y * rowStride
                 val row = y * w
                 for (x in 0 until w) {
-                    if (i + 2 >= bytes.size) break
+                    if (i + 2 >= size) break
                     val r = bytes[i].toInt() and 0xff
                     val g = bytes[i + 1].toInt() and 0xff
                     val b = bytes[i + 2].toInt() and 0xff
@@ -401,6 +328,165 @@ class ScreenService : Service() {
         } finally {
             image.close()
         }
+    }
+
+    /** The newest picture if Android has sent one, else the last one. Never waits. */
+    private fun newest(): Frame? {
+        val image = reader?.acquireLatestImage() ?: return lastFrame
+        return decode(image)
+    }
+
+    // ---------------------------------------------------------------- watching, not waiting
+
+    /**
+     * Rather than waiting a fixed time and hoping the screen is ready, these watch each new
+     * picture as it arrives and answer the moment it is: the pop-up is up, the pop-up is gone,
+     * the page has stopped. A fast phone and a fast website go as fast as they can; a slow
+     * phone takes just as long as it needs. [maxMs] only stops a wait going on for ever.
+     */
+
+    /** How much of the pop-up's colour is on screen, as a count of sampled points. */
+    fun colourCount(target: Int, tolerance: Int, skipTopPct: Int, done: (Int) -> Unit) {
+        worker.post {
+            val n = try {
+                newest()?.let { samples(it, target, tolerance, skipTopPct) } ?: 0
+            } catch (t: Throwable) {
+                Log.e(TAG, "colour count failed", t)
+                0
+            }
+            main.post { done(n) }
+        }
+    }
+
+    /**
+     * Waits for the pop-up: more of [target] than the [before] count taken just before the
+     * tap. Hands back its button, in screen pixels - or null if none shows within [maxMs].
+     */
+    fun awaitPopup(
+        target: Int, tolerance: Int, skipTopPct: Int, before: Int, maxMs: Long,
+        done: (Rect?) -> Unit
+    ) {
+        worker.post {
+            var button: Rect? = null
+            try {
+                val until = SystemClock.uptimeMillis() + maxMs
+                while (true) {
+                    val frame = newest()
+                    if (frame != null &&
+                        samples(frame, target, tolerance, skipTopPct) >= before + POPUP_SAMPLES
+                    ) {
+                        val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
+                        button = BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
+                            ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
+                        if (button != null) break
+                    }
+                    if (SystemClock.uptimeMillis() >= until) break
+                    Thread.sleep(POLL_MS)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "pop-up watch failed", t)
+            }
+            main.post { done(button) }
+        }
+    }
+
+    /** Waits for the pop-up to go: back to about the [before] count. False if not by [maxMs]. */
+    fun awaitPopupGone(
+        target: Int, tolerance: Int, skipTopPct: Int, before: Int, maxMs: Long,
+        done: (Boolean) -> Unit
+    ) {
+        worker.post {
+            var gone = false
+            try {
+                val until = SystemClock.uptimeMillis() + maxMs
+                while (true) {
+                    val frame = newest()
+                    if (frame == null ||
+                        samples(frame, target, tolerance, skipTopPct) < before + POPUP_SAMPLES / 2
+                    ) {
+                        gone = true
+                        break
+                    }
+                    if (SystemClock.uptimeMillis() >= until) break
+                    Thread.sleep(POLL_MS)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "pop-up watch failed", t)
+                gone = true
+            }
+            main.post { done(gone) }
+        }
+    }
+
+    /**
+     * Waits until the screen stops changing: Android sends no new picture for [QUIET_MS], or
+     * two pictures in a row are the same. At most [maxMs].
+     */
+    fun awaitStill(maxMs: Long, done: () -> Unit) {
+        worker.post {
+            try {
+                val until = SystemClock.uptimeMillis() + maxMs
+                var quietSince = SystemClock.uptimeMillis()
+                var previous: IntArray? = null
+                while (SystemClock.uptimeMillis() < until) {
+                    val image = reader?.acquireLatestImage()
+                    if (image == null) {
+                        if (SystemClock.uptimeMillis() - quietSince >= QUIET_MS) break
+                    } else {
+                        val now = look(decode(image))
+                        if (previous != null && alike(previous, now)) break
+                        previous = now
+                        quietSince = SystemClock.uptimeMillis()
+                    }
+                    Thread.sleep(POLL_MS)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "stillness watch failed", t)
+            }
+            main.post { done() }
+        }
+    }
+
+    /** Points of [target] colour, sampling every 3rd pixel each way below the top slice. */
+    private fun samples(frame: Frame, target: Int, tolerance: Int, skipTopPct: Int): Int {
+        val tr = (target shr 16) and 0xff
+        val tg = (target shr 8) and 0xff
+        val tb = target and 0xff
+        var n = 0
+        var y = frame.h * skipTopPct.coerceIn(0, 90) / 100
+        while (y < frame.h) {
+            val row = y * frame.w
+            var x = 0
+            while (x < frame.w) {
+                val c = frame.rgb[row + x]
+                if (abs(((c shr 16) and 0xff) - tr) <= tolerance &&
+                    abs(((c shr 8) and 0xff) - tg) <= tolerance &&
+                    abs((c and 0xff) - tb) <= tolerance
+                ) n++
+                x += 3
+            }
+            y += 3
+        }
+        return n
+    }
+
+    /** A rough copy of a picture - every 6th pixel's green - to tell whether it changed. */
+    private fun look(frame: Frame): IntArray {
+        val cols = frame.w / 6
+        val rows = frame.h / 6
+        val out = IntArray(cols * rows)
+        for (r in 0 until rows) {
+            val row = r * 6 * frame.w
+            for (c in 0 until cols) out[r * cols + c] = (frame.rgb[row + c * 6] shr 8) and 0xff
+        }
+        return out
+    }
+
+    private fun alike(a: IntArray, b: IntArray): Boolean {
+        if (a.size != b.size) return false
+        var diff = 0L
+        for (i in a.indices) diff += abs(a[i] - b[i])
+        return diff <= a.size.toLong()      // on average under one level apart
     }
 
     private fun detect(minPx: Int, maxPx: Int): List<Rect> {
@@ -417,6 +503,8 @@ class ScreenService : Service() {
             val b = c and 0xff
             lum[k] = (r * 299 + g * 587 + b * 114) / 1000
         }
-        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map { toScreen(it, frame) }
+        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map {
+            Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
+        }
     }
 }
