@@ -130,21 +130,19 @@ class MainActivity : Activity() {
         root.addView(skipTopInput)
 
         root.addView(heading("Speed"))
-        root.addView(note("The run watches the screen and moves on the moment it is ready - " +
-                "the pop-up is up, the pop-up is gone, the page has stopped - so it goes as " +
-                "fast as the phone and the website allow. These are only the longest it will " +
-                "wait for each (milliseconds, 1000 is one second)."))
+        root.addView(note("Milliseconds. 1000 is one second - lower is faster, but a screen " +
+                "that has not caught up yet gets ticked in the wrong place."))
 
-        root.addView(label("Longest wait for the pop-up after a tick"))
-        tickWaitInput = number(p.getInt("popupMaxMs", 1500))
+        root.addView(label("After ticking a box (waits for the pop-up)"))
+        tickWaitInput = number(p.getInt("tickWaitMs", 300))
         root.addView(tickWaitInput)
 
-        root.addView(label("Longest wait for the pop-up to close"))
-        clearWaitInput = number(p.getInt("goneMaxMs", 1500))
+        root.addView(label("After clearing the pop-up"))
+        clearWaitInput = number(p.getInt("clearWaitMs", 300))
         root.addView(clearWaitInput)
 
-        root.addView(label("Longest wait for the page to stop after a scroll"))
-        scrollWaitInput = number(p.getInt("stillMaxMs", 1500))
+        root.addView(label("After scrolling"))
+        scrollWaitInput = number(p.getInt("scrollWaitMs", 300))
         root.addView(scrollWaitInput)
 
 
@@ -159,18 +157,8 @@ class MainActivity : Activity() {
                 requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
             }
             val projection = getSystemService(MediaProjectionManager::class.java)
-            // Android 14 and later offer to share "a single app" instead of the whole screen.
-            // A single app's picture is sized and placed differently from the screen, so every
-            // tap would land in the wrong place: ask for the entire screen only.
-            val ask = if (Build.VERSION.SDK_INT >= 34) {
-                projection.createScreenCaptureIntent(
-                    android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay()
-                )
-            } else {
-                projection.createScreenCaptureIntent()
-            }
             @Suppress("DEPRECATION")
-            startActivityForResult(ask, 1)
+            startActivityForResult(projection.createScreenCaptureIntent(), 1)
         })
 
         root.addView(note("With screen reading on, a screen that publishes nothing is still " +
@@ -229,9 +217,9 @@ class MainActivity : Activity() {
             .putBoolean("tapColour", tapColour.isChecked)
             .putInt("colour", parseColour(colourInput.text.toString()))
             .putInt("colourTol", tolInput.text.toString().toIntOrNull()?.coerceIn(0, 200) ?: 60)
-            .putInt("popupMaxMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(200, 10000) ?: 1500)
-            .putInt("goneMaxMs", clearWaitInput.text.toString().toIntOrNull()?.coerceIn(200, 10000) ?: 1500)
-            .putInt("stillMaxMs", scrollWaitInput.text.toString().toIntOrNull()?.coerceIn(200, 10000) ?: 1500)
+            .putInt("tickWaitMs", tickWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
+            .putInt("clearWaitMs", clearWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
+            .putInt("scrollWaitMs", scrollWaitInput.text.toString().toIntOrNull()?.coerceIn(0, 10000) ?: 300)
             .putInt("skipTopPct", skipTopInput.text.toString().toIntOrNull()?.coerceIn(0, 90) ?: 20)
             .apply()
         CheckboxService.instance?.applySettings()
