@@ -61,6 +61,14 @@ object BoxFinder {
                 if (x > 0 && edge[idx - 1] && !seen[idx - 1]) { seen[idx - 1] = true; stack[sp++] = idx - 1 }
                 if (y + 1 < h && edge[idx + w] && !seen[idx + w]) { seen[idx + w] = true; stack[sp++] = idx + w }
                 if (y > 0 && edge[idx - w] && !seen[idx - w]) { seen[idx - w] = true; stack[sp++] = idx - w }
+                // Diagonal neighbours too: round a box's rounded corner the outline's pixels
+                // often touch only corner to corner. Joining side to side alone broke one box
+                // into several pieces, none running along all four sides - about one box in
+                // seven was missed, depending on how its pixels happened to fall.
+                if (x + 1 < w && y + 1 < h && edge[idx + w + 1] && !seen[idx + w + 1]) { seen[idx + w + 1] = true; stack[sp++] = idx + w + 1 }
+                if (x > 0 && y + 1 < h && edge[idx + w - 1] && !seen[idx + w - 1]) { seen[idx + w - 1] = true; stack[sp++] = idx + w - 1 }
+                if (x + 1 < w && y > 0 && edge[idx - w + 1] && !seen[idx - w + 1]) { seen[idx - w + 1] = true; stack[sp++] = idx - w + 1 }
+                if (x > 0 && y > 0 && edge[idx - w - 1] && !seen[idx - w - 1]) { seen[idx - w - 1] = true; stack[sp++] = idx - w - 1 }
             }
 
             val bw = maxX - minX + 1
