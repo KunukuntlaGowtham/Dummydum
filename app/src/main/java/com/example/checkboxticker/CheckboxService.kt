@@ -225,7 +225,7 @@ class CheckboxService : AccessibilityService() {
         status("snap")
         screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
             if (!looping) return@findBoxesWithSketch
-            val found = boxes.filter { !hitsBubble(it) }.sortedBy { it.top }
+            val found = boxes.filter { !hitsBubble(it) && !inGestureArea(it) }.sortedBy { it.top }
             val limit = maxBoxes()
             onScreen.clear()
             for (box in found) {
@@ -572,6 +572,24 @@ class CheckboxService : AccessibilityService() {
 
     /** Our own windows are on screen during a scan, so nothing under them is a checkbox. */
     private fun hitsBubble(box: Rect): Boolean = covers(bubble, box) || covers(panel, box)
+
+    /**
+     * The strip along the bottom of the screen reserved for the system's own gestures - the
+     * home/back/recents bar, or a gesture-nav phone's swipe-up-for-home strip. A tap anywhere
+     * in it is taken by the system, not the page underneath, so a shape found there (an icon,
+     * the gesture pill) must never be treated as a checkbox and tapped.
+     */
+    private fun inGestureArea(box: Rect): Boolean = box.bottom > gestureAreaTop()
+
+    private fun gestureAreaTop(): Int {
+        val h = resources.displayMetrics.heightPixels
+        val id = resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        val reported = if (id > 0) resources.getDimensionPixelSize(id) else 0
+        // Whatever Android reports, plus a safety margin - some phones make the touch-sensitive
+        // strip taller than the bar they draw.
+        val height = maxOf(reported, dp(24)) + dp(16)
+        return h - height
+    }
 
     private fun covers(candidate: View?, box: Rect): Boolean {
         val view = candidate ?: return false
