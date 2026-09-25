@@ -42,6 +42,8 @@ class CheckboxService : AccessibilityService() {
         const val REPORT_FILE = "scan_report.txt"
         const val FAILED_FILE = "failed.txt"
         const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
+        const val POPUP_MAX_MS = 1500L             // longest wait for a pop-up to show or go
+        const val POLL_MS = 100L                   // how often to look again meanwhile
         @Volatile
         var instance: CheckboxService? = null
     }
@@ -266,13 +268,93 @@ class CheckboxService : AccessibilityService() {
             return
         }
         val item = onScreen[i]
-        val ok = gestureTap(item.box.exactCenterX(), item.box.exactCenterY())
-        if (ok) ticked++
-        status("box ${item.number}: tapped" + (if (ok) "" else " - refused"))
+        // First note any of the pop-up's colour already on the page (a form can use it for its
+        // own text), so only what appears after the tap is taken for the pop-up.
+        popupColourNow { before ->
+            if (!looping) return@popupColourNow
+            val ok = gestureTap(item.box.exactCenterX(), item.box.exactCenterY())
+            if (ok) ticked++
+            status("box ${item.number}: tapped" + (if (ok) "" else " - refused"))
+            main.postDelayed({
+                if (looping) clearPopup(before, SystemClock.uptimeMillis() + POPUP_MAX_MS) {
+                    tickNext(i + 1)
+                }
+            }, waitMs(prefs(), "tickWaitMs", 300))
+        }
+    }
+
+    /** The biggest patch of the pop-up's colour on screen now, or null. */
+    private fun popupColourNow(done: (Rect?) -> Unit) {
         val p = prefs()
-        main.postDelayed({
-            if (looping) afterTick { tickNext(i + 1) }
-        }, waitMs(p, "tickWaitMs", 300))
+        val screen = ScreenService.instance
+        if (!p.getBoolean("tapColour", true) || screen == null) {
+            done(null)
+            return
+        }
+        screen.findColour(
+            p.getInt("colour", DEFAULT_COLOUR),
+            p.getInt("colourTol", 60).coerceIn(0, 200),
+            p.getInt("skipTopPct", 20).coerceIn(0, 90)
+        ) { done(it) }
+    }
+
+    /** True when [a] is the same patch as [b] - the page's own, not a pop-up. */
+    private fun samePatch(a: Rect, b: Rect?): Boolean {
+        if (b == null) return false
+        val slack = dp(8)
+        return kotlin.math.abs(a.centerX() - b.centerX()) <= slack &&
+                kotlin.math.abs(a.centerY() - b.centerY()) <= slack &&
+                kotlin.math.abs(a.width() - b.width()) <= slack &&
+                kotlin.math.abs(a.height() - b.height()) <= slack
+    }
+
+    /**
+     * Waits for the pop-up instead of guessing how long it takes: looks again every tenth of a
+     * second until it shows, up to [until] - a slow phone simply takes a little longer. Taps
+     * it, then makes sure it has gone before the next box, tapping once more if it has not.
+     * With no pop-up by [until] (a box that would not tick shows none), it carries on.
+     */
+    private fun clearPopup(before: Rect?, until: Long, next: () -> Unit) {
+        if (!looping) return
+        popupColourNow { now ->
+            if (!looping) return@popupColourNow
+            if (now == null || samePatch(now, before)) {
+                if (SystemClock.uptimeMillis() < until) {
+                    main.postDelayed({ clearPopup(before, until, next) }, POLL_MS)
+                } else {
+                    status("pop-up: none")
+                    next()
+                }
+                return@popupColourNow
+            }
+            gestureTap(now.exactCenterX(), now.exactCenterY())
+            status("pop-up: tapped ${now.centerX()},${now.centerY()}")
+            main.postDelayed({
+                untilGone(before, SystemClock.uptimeMillis() + POPUP_MAX_MS, true, next)
+            }, waitMs(prefs(), "clearWaitMs", 300))
+        }
+    }
+
+    /** Carries on once the pop-up has gone - tapping it once more if it is still there. */
+    private fun untilGone(before: Rect?, until: Long, mayRetap: Boolean, next: () -> Unit) {
+        if (!looping) return
+        popupColourNow { now ->
+            if (!looping) return@popupColourNow
+            val gone = now == null || samePatch(now, before)
+            when {
+                gone -> next()
+                SystemClock.uptimeMillis() < until ->
+                    main.postDelayed({ untilGone(before, until, mayRetap, next) }, POLL_MS)
+                mayRetap -> {
+                    gestureTap(now!!.exactCenterX(), now.exactCenterY())
+                    status("pop-up: still there - tapped again")
+                    main.postDelayed({
+                        untilGone(before, SystemClock.uptimeMillis() + POPUP_MAX_MS, false, next)
+                    }, waitMs(prefs(), "clearWaitMs", 300))
+                }
+                else -> next()
+            }
+        }
     }
 
     /** Step 3: snap again - a box still empty where it was did not tick. */
@@ -335,7 +417,11 @@ class CheckboxService : AccessibilityService() {
         if (!looping) return
         val lowest = onScreen.maxOf { it.box.bottom }
         val h = resources.displayMetrics.heightPixels
-        val distance = (lowest + dp(16) - dp(72)).coerceIn(dp(48), h * 7 / 10)
+        // The last box goes to about a third of the way down, not to the very top: if the page
+        // runs on further than asked, nothing below it is lost, and a box one snap missed is
+        // still on screen for the next. Boxes already done are not numbered again - a ticked
+        // one is no longer empty, one that did not tick is known by its words.
+        val distance = (lowest + dp(16) - h * 35 / 100).coerceIn(dp(48), h * 55 / 100)
         scrollBy(distance)
     }
 
