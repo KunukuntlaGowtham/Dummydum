@@ -33,7 +33,6 @@ class ScreenService : Service() {
     companion object {
         const val TAG = "CheckboxTicker"
         const val CHANNEL = "ticker"
-        const val SCALE = 2          // work on a half-size copy of the screen
         const val CELL = 4           // pixels per cell across, in a sketch
 
         @Volatile
@@ -49,6 +48,14 @@ class ScreenService : Service() {
     private var reader: ImageReader? = null
     private var screenW = 0
     private var screenH = 0
+
+    /**
+     * How much smaller than the screen the pictures are. A full-HD or sharper screen is read
+     * at half size, which is plenty; a smaller screen is read at full size, or its checkboxes
+     * and the words beside them are too few pixels to go by.
+     */
+    @Volatile
+    private var scale = 2
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -119,9 +126,10 @@ class ScreenService : Service() {
         }
         screenW = size.x
         screenH = size.y
+        scale = if (minOf(screenW, screenH) >= 1000) 2 else 1
 
-        val w = screenW / SCALE
-        val h = screenH / SCALE
+        val w = screenW / scale
+        val h = screenH / scale
         val manager = getSystemService(MediaProjectionManager::class.java)
         val proj = manager.getMediaProjection(code, data)
         projection = proj
@@ -136,7 +144,7 @@ class ScreenService : Service() {
         val imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         reader = imageReader
         display = proj.createVirtualDisplay(
-            "ticker", w, h, maxOf(1, resources.displayMetrics.densityDpi / SCALE),
+            "ticker", w, h, maxOf(1, resources.displayMetrics.densityDpi / scale),
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.surface, null, worker
         )
     }
@@ -158,7 +166,7 @@ class ScreenService : Service() {
     fun findBoxes(minScreenPx: Int, maxScreenPx: Int, done: (List<Rect>) -> Unit) {
         worker.post {
             val boxes = try {
-                detect(minScreenPx / SCALE, maxScreenPx / SCALE)
+                detect(minScreenPx / scale, maxScreenPx / scale)
             } catch (t: Throwable) {
                 Log.e(TAG, "screen scan failed", t)
                 emptyList()
@@ -184,7 +192,7 @@ class ScreenService : Service() {
             try {
                 val frame = grab()
                 if (frame != null) {
-                    boxes = detectIn(frame, minScreenPx / SCALE, maxScreenPx / SCALE)
+                    boxes = detectIn(frame, minScreenPx / scale, maxScreenPx / scale)
                     sketch = sketchOf(frame, skip)
                 }
             } catch (t: Throwable) {
@@ -216,8 +224,8 @@ class ScreenService : Service() {
                 cells[y * cols + cx] = sum / CELL
             }
         }
-        val sw = if (screenW > 0) screenW else frame.w * SCALE
-        val sh = if (screenH > 0) screenH else frame.h * SCALE
+        val sw = if (screenW > 0) screenW else frame.w * scale
+        val sh = if (screenH > 0) screenH else frame.h * scale
         for (r in skip) {
             val left = (r.left.toLong() * frame.w / sw / CELL).toInt().coerceIn(0, cols)
             val right = ((r.right.toLong() * frame.w / sw + CELL - 1) / CELL).toInt().coerceIn(0, cols)
@@ -244,7 +252,7 @@ class ScreenService : Service() {
                 } else {
                     val minY = frame.h * skipTopPct.coerceIn(0, 90) / 100
                     BoxFinder.findColour(frame.rgb, frame.w, frame.h, target, tolerance, minY)
-                        ?.let { Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE) }
+                        ?.let { toScreen(it, frame) }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "colour scan failed", t)
@@ -255,6 +263,21 @@ class ScreenService : Service() {
     }
 
     private class Frame(val rgb: IntArray, val w: Int, val h: Int)
+
+    /**
+     * A place on the picture, in screen pixels - by the real ratio of the two sizes, not an
+     * assumed x2, so it lands exactly on any screen.
+     */
+    private fun toScreen(r: Rect, frame: Frame): Rect {
+        val sw = if (screenW > 0) screenW else frame.w * scale
+        val sh = if (screenH > 0) screenH else frame.h * scale
+        return Rect(
+            (r.left.toLong() * sw / frame.w).toInt(),
+            (r.top.toLong() * sh / frame.h).toInt(),
+            (r.right.toLong() * sw / frame.w).toInt(),
+            (r.bottom.toLong() * sh / frame.h).toInt()
+        )
+    }
 
     /** The last picture taken - still the screen, until Android sends a new one. */
     @Volatile
@@ -323,8 +346,6 @@ class ScreenService : Service() {
             val b = c and 0xff
             lum[k] = (r * 299 + g * 587 + b * 114) / 1000
         }
-        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map {
-            Rect(it.left * SCALE, it.top * SCALE, it.right * SCALE, it.bottom * SCALE)
-        }
+        return BoxFinder.find(lum, frame.w, frame.h, minPx, maxPx).map { toScreen(it, frame) }
     }
 }

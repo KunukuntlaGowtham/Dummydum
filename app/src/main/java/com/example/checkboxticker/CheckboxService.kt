@@ -42,6 +42,7 @@ class CheckboxService : AccessibilityService() {
         const val REPORT_FILE = "scan_report.txt"
         const val FAILED_FILE = "failed.txt"
         const val DEFAULT_COLOUR = 0x663398        // the purple button in the pop-up
+        const val OVERLAY_GONE_MS = 120L           // for the screen to redraw without our panel
         @Volatile
         var instance: CheckboxService? = null
     }
@@ -223,8 +224,18 @@ class CheckboxService : AccessibilityService() {
             return
         }
         status("snap")
-        screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
-            if (!looping) return@findBoxesWithSketch
+        hideOverlays()
+        main.postDelayed({
+            screen.findBoxesWithSketch(dp(14), dp(48), ownWindows()) { boxes, sketch ->
+                showOverlays()
+                if (looping) numberBoxes(boxes, sketch)
+            }
+        }, OVERLAY_GONE_MS)
+    }
+
+    /** Numbers the new boxes of a snap, top to bottom, and starts ticking them. */
+    private fun numberBoxes(boxes: List<Rect>, sketch: BoxLook.Sketch?) {
+        run {
             val found = boxes.filter { !hitsBubble(it) }.sortedBy { it.top }
             val limit = maxBoxes()
             onScreen.clear()
@@ -243,7 +254,7 @@ class CheckboxService : AccessibilityService() {
                 } else {
                     nothingNew()
                 }
-                return@findBoxesWithSketch
+                return@run
             }
             emptySnaps = 0
             status("boxes ${onScreen.first().number} to ${onScreen.last().number} on this screen")
@@ -276,8 +287,18 @@ class CheckboxService : AccessibilityService() {
             return
         }
         status("checking")
-        screen.findBoxes(dp(14), dp(48)) { boxes ->
-            if (!looping) return@findBoxes
+        hideOverlays()
+        main.postDelayed({
+            screen.findBoxes(dp(14), dp(48)) { boxes ->
+                showOverlays()
+                if (looping) judgeSnap(boxes)
+            }
+        }, OVERLAY_GONE_MS)
+    }
+
+    /** Boxes still empty where they were did not tick; then on to the next screen. */
+    private fun judgeSnap(boxes: List<Rect>) {
+        run {
             for (item in onScreen) {
                 if (boxes.any { Rect.intersects(it, item.box) }) {
                     noteNotTicked(item.number)
@@ -387,8 +408,22 @@ class CheckboxService : AccessibilityService() {
         BoxLook.cut(sketch, box.left - dp(4), box.top - dp(4), dp(300), dp(140))
 
     /** Where our own windows are, left out of the snap's copy of the screen. */
-    private fun ownWindows(): List<Rect> =
-        listOfNotNull(boundsOfView(bubble), boundsOfView(panel), boundsOfView(numbersView))
+    private fun ownWindows(): List<Rect> = listOfNotNull(boundsOfView(bubble))
+
+    /**
+     * The status panel and the numbers label are see-through, but they are still in the
+     * picture and can hide a checkbox - on a smaller screen they sit right over the boxes.
+     * They step aside for the moment of each snap. (Taps go through them anyway.)
+     */
+    private fun hideOverlays() {
+        panel?.visibility = View.INVISIBLE
+        numbersView?.visibility = View.INVISIBLE
+    }
+
+    private fun showOverlays() {
+        panel?.visibility = View.VISIBLE
+        numbersView?.visibility = View.VISIBLE
+    }
 
     private fun boundsOfView(candidate: View?): Rect? {
         val view = candidate ?: return null
@@ -571,7 +606,7 @@ class CheckboxService : AccessibilityService() {
     }
 
     /** Our own windows are on screen during a scan, so nothing under them is a checkbox. */
-    private fun hitsBubble(box: Rect): Boolean = covers(bubble, box) || covers(panel, box)
+    private fun hitsBubble(box: Rect): Boolean = covers(bubble, box)
 
     private fun covers(candidate: View?, box: Rect): Boolean {
         val view = candidate ?: return false
