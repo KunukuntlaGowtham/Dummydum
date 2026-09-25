@@ -33,7 +33,12 @@ class ScreenService : Service() {
     companion object {
         const val TAG = "CheckboxTicker"
         const val CHANNEL = "ticker"
-        const val CELL = 4           // pixels per cell across, in a sketch
+        /**
+         * Picture pixels per dp that finding and recognising boxes are tuned for - what a
+         * full-HD phone read at half size gives. Every phone is read at the size that gives
+         * this, so a checkbox and the words beside it come out the same size on any phone.
+         */
+        const val PX_PER_DP = 1.3125f
 
         @Volatile
         var instance: ScreenService? = null
@@ -50,12 +55,14 @@ class ScreenService : Service() {
     private var screenH = 0
 
     /**
-     * How much smaller than the screen the pictures are. A full-HD or sharper screen is read
-     * at half size, which is plenty; a smaller screen is read at full size, or its checkboxes
-     * and the words beside them are too few pixels to go by.
+     * How much smaller than the screen the pictures are: whatever brings them to
+     * [PX_PER_DP], never larger than the screen itself. Tested on real pictures of the form,
+     * reading at full size on a full-HD phone found fewer boxes, not more - the finder wants
+     * the same detail on every phone, not the most.
      */
     @Volatile
-    private var scale = 2
+    private var scale = 2f
+    private var density = 2.625f
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -126,10 +133,11 @@ class ScreenService : Service() {
         }
         screenW = size.x
         screenH = size.y
-        scale = if (minOf(screenW, screenH) >= 1000) 2 else 1
+        density = resources.displayMetrics.density
+        scale = maxOf(1f, density / PX_PER_DP)
 
-        val w = screenW / scale
-        val h = screenH / scale
+        val w = Math.round(screenW / scale)
+        val h = Math.round(screenH / scale)
         val manager = getSystemService(MediaProjectionManager::class.java)
         val proj = manager.getMediaProjection(code, data)
         projection = proj
@@ -144,7 +152,7 @@ class ScreenService : Service() {
         val imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         reader = imageReader
         display = proj.createVirtualDisplay(
-            "ticker", w, h, maxOf(1, resources.displayMetrics.densityDpi / scale),
+            "ticker", w, h, maxOf(1, Math.round(resources.displayMetrics.densityDpi / scale)),
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.surface, null, worker
         )
     }
@@ -166,7 +174,7 @@ class ScreenService : Service() {
     fun findBoxes(minScreenPx: Int, maxScreenPx: Int, done: (List<Rect>) -> Unit) {
         worker.post {
             val boxes = try {
-                detect(minScreenPx / scale, maxScreenPx / scale)
+                detect((minScreenPx / scale).toInt(), (maxScreenPx / scale).toInt())
             } catch (t: Throwable) {
                 Log.e(TAG, "screen scan failed", t)
                 emptyList()
@@ -192,7 +200,7 @@ class ScreenService : Service() {
             try {
                 val frame = grab()
                 if (frame != null) {
-                    boxes = detectIn(frame, minScreenPx / scale, maxScreenPx / scale)
+                    boxes = detectIn(frame, (minScreenPx / scale).toInt(), (maxScreenPx / scale).toInt())
                     sketch = sketchOf(frame, skip)
                 }
             } catch (t: Throwable) {
@@ -203,43 +211,45 @@ class ScreenService : Service() {
     }
 
     /**
-     * Every row of the screen, each cell the average brightness of [CELL] pixels side by
-     * side. Our own windows - whose text changes from one snap to the next - are marked
-     * [BoxLook.SKIP].
+     * A grey copy of the screen in cells of about 3 x 0.75 dp, whatever the phone, each the
+     * average brightness of the picture pixels it covers. Our own windows - whose text changes
+     * from one snap to the next - are marked [BoxLook.SKIP].
      */
     private fun sketchOf(frame: Frame, skip: List<Rect>): BoxLook.Sketch {
-        val cols = frame.w / CELL
-        val rows = frame.h
+        val sw = if (screenW > 0) screenW else Math.round(frame.w * scale)
+        val sh = if (screenH > 0) screenH else Math.round(frame.h * scale)
+        val framePxPerDp = density * frame.w / sw
+        val cw = maxOf(1, Math.round(3.05f * framePxPerDp))
+        val ch = maxOf(1, Math.round(0.76f * framePxPerDp))
+        val cols = frame.w / cw
+        val rows = frame.h / ch
         val cells = IntArray(cols * rows)
         for (y in 0 until rows) {
-            val row = y * frame.w
             for (cx in 0 until cols) {
                 var sum = 0
-                val x0 = cx * CELL
-                for (x in x0 until x0 + CELL) {
-                    val c = frame.rgb[row + x]
-                    sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
-                            (c and 0xff) * 114) / 1000
+                for (yy in y * ch until y * ch + ch) {
+                    val row = yy * frame.w
+                    for (x in cx * cw until cx * cw + cw) {
+                        val c = frame.rgb[row + x]
+                        sum += (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 +
+                                (c and 0xff) * 114) / 1000
+                    }
                 }
-                cells[y * cols + cx] = sum / CELL
+                cells[y * cols + cx] = sum / (cw * ch)
             }
         }
-        val sw = if (screenW > 0) screenW else frame.w * scale
-        val sh = if (screenH > 0) screenH else frame.h * scale
+        val pxPerCol = sw.toFloat() / cols
+        val pxPerRow = sh.toFloat() / rows
         for (r in skip) {
-            val left = (r.left.toLong() * frame.w / sw / CELL).toInt().coerceIn(0, cols)
-            val right = ((r.right.toLong() * frame.w / sw + CELL - 1) / CELL).toInt().coerceIn(0, cols)
-            val top = (r.top.toLong() * rows / sh).toInt().coerceIn(0, rows)
-            val bottom = (r.bottom.toLong() * rows / sh + 1).toInt().coerceIn(0, rows)
+            val left = (r.left / pxPerCol).toInt().coerceIn(0, cols)
+            val right = (r.right / pxPerCol + 1).toInt().coerceIn(0, cols)
+            val top = (r.top / pxPerRow).toInt().coerceIn(0, rows)
+            val bottom = (r.bottom / pxPerRow + 1).toInt().coerceIn(0, rows)
             for (y in top until bottom) {
                 for (x in left until right) cells[y * cols + x] = BoxLook.SKIP
             }
         }
-        return BoxLook.Sketch(
-            cells, cols, rows,
-            pxPerCol = sw.toFloat() * CELL / frame.w,
-            pxPerRow = sh.toFloat() / rows
-        )
+        return BoxLook.Sketch(cells, cols, rows, pxPerCol, pxPerRow)
     }
 
     /** Finds the biggest patch of one colour, ignoring the top [skipTopPct] % of the screen. */
@@ -269,8 +279,8 @@ class ScreenService : Service() {
      * assumed x2, so it lands exactly on any screen.
      */
     private fun toScreen(r: Rect, frame: Frame): Rect {
-        val sw = if (screenW > 0) screenW else frame.w * scale
-        val sh = if (screenH > 0) screenH else frame.h * scale
+        val sw = if (screenW > 0) screenW else Math.round(frame.w * scale)
+        val sh = if (screenH > 0) screenH else Math.round(frame.h * scale)
         return Rect(
             (r.left.toLong() * sw / frame.w).toInt(),
             (r.top.toLong() * sh / frame.h).toInt(),

@@ -157,8 +157,18 @@ class MainActivity : Activity() {
                 requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 2)
             }
             val projection = getSystemService(MediaProjectionManager::class.java)
+            // Android 14 and later offer to share "a single app" instead of the whole screen.
+            // A single app's picture is sized and placed differently from the screen, so every
+            // tap would land in the wrong place: ask for the entire screen only.
+            val ask = if (Build.VERSION.SDK_INT >= 34) {
+                projection.createScreenCaptureIntent(
+                    android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay()
+                )
+            } else {
+                projection.createScreenCaptureIntent()
+            }
             @Suppress("DEPRECATION")
-            startActivityForResult(projection.createScreenCaptureIntent(), 1)
+            startActivityForResult(ask, 1)
         })
 
         root.addView(note("With screen reading on, a screen that publishes nothing is still " +
